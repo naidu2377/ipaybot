@@ -47,8 +47,9 @@ The bot does not perform, accelerate, or verify withdrawals. Boost replies are a
    The Docker image
    installs Tesseract at `/usr/bin/tesseract` and runs an actual generated-image
    OCR smoke test during the build; local hosts need Tesseract available on
-   `PATH` or configured with `TESSERACT_CMD`. Each Tesseract pass is limited to
-   30 seconds by default; set `SCREENSHOT_OCR_TIMEOUT_SECONDS` to tune it.
+   `PATH` or configured with `TESSERACT_CMD`. Tesseract runs one OCR process at
+   a time to avoid CPU contention, and each pass is limited to 60 seconds by
+   default; set `SCREENSHOT_OCR_TIMEOUT_SECONDS` to tune it.
    Gemini Vision confirmation has a separate 8-second limit by default; on
    timeout the existing strict OCR fallback proceeds. Set
    `SCREENSHOT_VISION_TIMEOUT_SECONDS` to tune it.

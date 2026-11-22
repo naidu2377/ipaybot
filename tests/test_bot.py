@@ -3,6 +3,8 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -766,6 +768,39 @@ class BotTests(unittest.TestCase):
             config="--psm 6",
             timeout=bot.SCREENSHOT_OCR_TIMEOUT_SECONDS,
         )
+
+    def test_tesseract_processes_are_serialized(self):
+        state_lock = threading.Lock()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        active_calls = 0
+        max_active_calls = 0
+
+        def fake_process(call_id):
+            nonlocal active_calls, max_active_calls
+            with state_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+                if call_id == 1:
+                    first_started.set()
+            if call_id == 1:
+                release_first.wait(timeout=2)
+            with state_lock:
+                active_calls -= 1
+            return call_id
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(bot._run_tesseract_process, fake_process, 1)
+            self.assertTrue(first_started.wait(timeout=1))
+            second = executor.submit(bot._run_tesseract_process, fake_process, 2)
+            time.sleep(0.05)
+            with state_lock:
+                self.assertEqual(active_calls, 1)
+            release_first.set()
+            self.assertEqual(first.result(timeout=1), 1)
+            self.assertEqual(second.result(timeout=1), 2)
+
+        self.assertEqual(max_active_calls, 1)
 
     def test_tesseract_auto_detection_finds_install_under_program_files(self):
         install_root = self.root / "Programs"
