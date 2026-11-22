@@ -134,21 +134,24 @@ create table if not exists public.problem_categories (
     description text,
     created_at timestamptz not null default now()
 );
-insert into public.problem_categories(key,title,description) values
- ('withdrawal','Withdrawal problems','Payout delays, pending withdrawals, and withdrawal errors'),
- ('deposit','Deposit problems','Missing or delayed deposits'),
- ('payment','Payment issues','Payment processing and UPI problems'),
- ('wallet','Wallet issues','Wallet eligibility and connection problems'),
- ('account_verification','Account verification','KYC and verification issues'),
- ('login','Login problems','Sign-in and access issues'),
- ('transaction_tracking','Transaction tracking','Order and transaction status queries'),
- ('account_restriction','Account restrictions','Locked or restricted accounts'),
- ('referral','Referral problems','Referral and invite questions'),
- ('technical_error','Technical errors','App failures and technical errors'),
- ('bot_functionality','Bot functionality','Telegram bot features and commands'),
- ('feature_request','Feature requests','Requested product or bot improvements'),
- ('general_support','General support','Other support requests')
-on conflict(key) do nothing;
+insert into public.problem_categories(id, key, title, description) values
+ ('e5c02b74-1234-4a21-98a1-000000000001'::uuid, 'withdrawal', 'Withdrawal problems', 'Payout delays, pending withdrawals, and withdrawal errors'),
+ ('e5c02b74-1234-4a21-98a1-000000000002'::uuid, 'deposit', 'Deposit problems', 'Missing or delayed deposits'),
+ ('e5c02b74-1234-4a21-98a1-000000000003'::uuid, 'payment', 'Payment issues', 'Payment processing and UPI problems'),
+ ('e5c02b74-1234-4a21-98a1-000000000004'::uuid, 'wallet', 'Wallet issues', 'Wallet eligibility and connection problems'),
+ ('8e6b0e9e-08e6-4bbb-bd6e-10866061f653'::uuid, 'wallet_issue', 'Wallet Management & Troubleshooting', 'Wallet binding, relinking, verification, locked wallets, and points/balance issues'),
+ ('e5c02b74-1234-4a21-98a1-000000000005'::uuid, 'account_verification', 'Account verification', 'KYC and verification issues'),
+ ('e5c02b74-1234-4a21-98a1-000000000006'::uuid, 'login', 'Login problems', 'Sign-in and access issues'),
+ ('e5c02b74-1234-4a21-98a1-000000000007'::uuid, 'transaction_tracking', 'Transaction tracking', 'Order and transaction status queries'),
+ ('e5c02b74-1234-4a21-98a1-000000000008'::uuid, 'account_restriction', 'Account restrictions', 'Locked or restricted accounts'),
+ ('e5c02b74-1234-4a21-98a1-000000000009'::uuid, 'referral', 'Referral problems', 'Referral and invite questions'),
+ ('74a941d5-c22a-46e4-8b72-5828ceb4aa54'::uuid, 'technical_error', 'Technical Errors & App Troubleshooting', 'App failures, crashes, login/blank screen issues, and technical troubleshooting'),
+ ('e5c02b74-1234-4a21-98a1-000000000010'::uuid, 'bot_functionality', 'Bot functionality', 'Telegram bot features and commands'),
+ ('e5c02b74-1234-4a21-98a1-000000000011'::uuid, 'feature_request', 'Feature requests', 'Requested product or bot improvements'),
+ ('e5c02b74-1234-4a21-98a1-000000000012'::uuid, 'general_support', 'General support', 'Other support requests')
+on conflict(key) do update set
+    title = excluded.title,
+    description = excluded.description;
 
 create table if not exists public.problem_clusters (
     id uuid primary key default gen_random_uuid(),
@@ -359,6 +362,136 @@ begin
 end;
 $function$;
 
+create or replace function public.reserve_screenshot_image_cooldown(
+    p_user_id bigint,
+    p_image_hash text,
+    p_cooldown_seconds integer
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $function$
+declare
+    v_now timestamptz := clock_timestamp();
+    v_cooldown interval;
+    v_reserved boolean := false;
+begin
+    if p_user_id is null or p_user_id <= 0
+        or p_image_hash is null or p_image_hash !~ '^[0-9a-f]{64}$'
+        or p_cooldown_seconds is null or p_cooldown_seconds <= 0 then
+        raise exception 'Invalid screenshot cooldown key or duration';
+    end if;
+
+    v_cooldown := make_interval(secs => p_cooldown_seconds);
+
+    delete from public.screenshot_image_cooldowns
+    where last_submitted_at <= v_now - v_cooldown;
+
+    insert into public.screenshot_image_cooldowns(
+        user_id, image_hash, last_submitted_at
+    )
+    values (p_user_id, p_image_hash, v_now)
+    on conflict (user_id, image_hash) do update
+    set last_submitted_at = excluded.last_submitted_at
+    where public.screenshot_image_cooldowns.last_submitted_at
+        <= excluded.last_submitted_at - v_cooldown
+    returning true into v_reserved;
+
+    return coalesce(v_reserved, false);
+end;
+$function$;
+
+-- Issue Spike Alert Tracking and Incident State
+create table if not exists public.issue_spike_reports (
+    category text not null check (category in (
+        'ORDER_LOCKED', 'WITHDRAWAL_LOCKED', 'WITHDRAWAL_PENDING',
+        'DEPOSIT_PENDING', 'PAYMENT_FAILED'
+    )),
+    chat_id bigint not null,
+    message_id bigint not null,
+    user_id bigint,
+    created_at timestamptz not null,
+    primary key (category, chat_id, message_id)
+);
+create index if not exists idx_issue_spike_reports_category_time
+    on public.issue_spike_reports(category, created_at desc);
+
+create table if not exists public.issue_spike_alert_state (
+    category text primary key check (category in (
+        'ORDER_LOCKED', 'WITHDRAWAL_LOCKED', 'WITHDRAWAL_PENDING',
+        'DEPOSIT_PENDING', 'PAYMENT_FAILED'
+    )),
+    last_alert_at timestamptz,
+    incident_active boolean not null default false
+);
+
+create or replace function public.claim_issue_spike_alert(
+    p_category text,
+    p_window_start timestamptz,
+    p_now timestamptz,
+    p_threshold integer,
+    p_cooldown_seconds integer
+)
+returns table(should_alert boolean, report_count bigint, unique_user_count bigint)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $function$
+declare
+    v_active boolean := false;
+    v_last_alert_at timestamptz;
+begin
+    if p_category is null or p_category not in (
+        'ORDER_LOCKED', 'WITHDRAWAL_LOCKED', 'WITHDRAWAL_PENDING',
+        'DEPOSIT_PENDING', 'PAYMENT_FAILED'
+    ) or p_window_start is null or p_now is null
+        or p_threshold is null or p_threshold < 1
+        or p_cooldown_seconds is null or p_cooldown_seconds < 1 then
+        raise exception 'Invalid issue spike alert parameters';
+    end if;
+
+    delete from public.issue_spike_reports
+    where created_at < p_now - interval '30 days';
+
+    select count(*), count(distinct user_id)
+    into report_count, unique_user_count
+    from public.issue_spike_reports
+    where category = p_category
+      and created_at >= p_window_start
+      and created_at <= p_now;
+
+    insert into public.issue_spike_alert_state(category, last_alert_at, incident_active)
+    values (p_category, null, false)
+    on conflict (category) do nothing;
+
+    select incident_active, last_alert_at
+    into v_active, v_last_alert_at
+    from public.issue_spike_alert_state
+    where category = p_category
+    for update;
+
+    if report_count < p_threshold then
+        update public.issue_spike_alert_state
+        set incident_active = false
+        where category = p_category;
+        should_alert := false;
+    else
+        should_alert := not v_active and (
+            v_last_alert_at is null
+            or v_last_alert_at <= p_now - make_interval(secs => p_cooldown_seconds)
+        );
+        if should_alert then
+            update public.issue_spike_alert_state
+            set last_alert_at = p_now, incident_active = true
+            where category = p_category;
+        end if;
+    end if;
+
+    return next;
+end;
+$function$;
+
 alter table public.problem_categories enable row level security;
 alter table public.problem_clusters enable row level security;
 alter table public.question_events enable row level security;
@@ -372,21 +505,38 @@ alter table public.daily_reports enable row level security;
 alter table public.bot_activity_logs enable row level security;
 alter table public.handled_screenshot_messages enable row level security;
 alter table public.screenshot_image_cooldowns enable row level security;
+alter table public.issue_spike_reports enable row level security;
+alter table public.issue_spike_alert_state enable row level security;
 
 revoke all on table public.problem_categories, public.problem_clusters, public.question_events,
     public.question_cluster_links, public.user_question_history, public.group_question_analytics,
     public.admin_notes, public.question_resolutions, public.bot_knowledge_gaps,
     public.daily_reports, public.bot_activity_logs, public.handled_screenshot_messages,
-    public.screenshot_image_cooldowns
+    public.screenshot_image_cooldowns, public.issue_spike_reports, public.issue_spike_alert_state
     from anon, authenticated;
 grant all on table public.problem_categories, public.problem_clusters, public.question_events,
     public.question_cluster_links, public.user_question_history, public.group_question_analytics,
     public.admin_notes, public.question_resolutions, public.bot_knowledge_gaps,
     public.daily_reports, public.bot_activity_logs, public.handled_screenshot_messages,
-    public.screenshot_image_cooldowns
+    public.screenshot_image_cooldowns, public.issue_spike_reports, public.issue_spike_alert_state
     to service_role;
+
 revoke all on function public.reserve_screenshot_image_cooldown(bigint, text)
     from public, anon, authenticated;
 grant execute on function public.reserve_screenshot_image_cooldown(bigint, text)
     to service_role;
+
+revoke all on function public.reserve_screenshot_image_cooldown(bigint, text, integer)
+    from public, anon, authenticated;
+grant execute on function public.reserve_screenshot_image_cooldown(bigint, text, integer)
+    to service_role;
+
+revoke all on function public.claim_issue_spike_alert(text, timestamptz, timestamptz, integer, integer)
+    from public, anon, authenticated;
+grant execute on function public.claim_issue_spike_alert(text, timestamptz, timestamptz, integer, integer)
+    to service_role;
+
 grant usage, select on all sequences in schema public to service_role;
+
+-- Refresh PostgREST's function and schema metadata
+notify pgrst, 'reload schema';
