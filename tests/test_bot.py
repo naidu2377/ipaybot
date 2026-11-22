@@ -1600,16 +1600,16 @@ class BotTests(unittest.TestCase):
                 await bot.group_screenshot_handler(update, context)
                 await bot.group_screenshot_handler(duplicate, context)
 
-            ocr.assert_awaited_once()
-            sent = context.bot.send_message.await_args_list[0].kwargs
-            self.assertEqual(sent["reply_to_message_id"], 41)
-            self.assertIn(sent["text"], bot.WITHDRAWAL_IMAGE_REPLIES)
-            warning = context.bot.send_message.await_args_list[1].kwargs["text"]
-            self.assertIn("🆔 User ID: 8", warning)
-            context.bot.delete_message.assert_awaited_once_with(
-                chat_id=-100,
-                message_id=42,
-            )
+            self.assertEqual(ocr.await_count, 2)
+            sent_messages = context.bot.send_message.await_args_list
+            self.assertEqual(len(sent_messages), 2)
+            for call, expected_message_id in zip(sent_messages, (41, 42)):
+                self.assertEqual(
+                    call.kwargs["reply_to_message_id"],
+                    expected_message_id,
+                )
+                self.assertIn(call.kwargs["text"], bot.WITHDRAWAL_IMAGE_REPLIES)
+            context.bot.delete_message.assert_not_awaited()
 
         with patch.object(bot, "DB_PATH", self.root / "image-documents.sqlite3"):
             asyncio.run(scenario())
@@ -1621,20 +1621,27 @@ class BotTests(unittest.TestCase):
                 "Locking 22:58:41 Income Activity Quota Balance "
                 "Feedback received waiting for processing Proceed",
                 bot.ORDER_IMAGE_REPLIES,
+                True,
             ),
             (
                 "Withdrawal 08/11/2026 - 14/11/2026 Locking "
                 "Locking 09:05:04 Quota Balance",
                 bot.WITHDRAWAL_IMAGE_REPLIES,
+                True,
             ),
             (
                 "Withdrawal Pending transaction 100.00 Quota 100.00 "
                 "Balance 27.00",
                 bot.WITHDRAWAL_PENDING_IMAGE_REPLIES,
+                False,
             ),
         )
 
-        for index, (ocr_text, category_templates) in enumerate(categories):
+        for index, (
+            ocr_text,
+            category_templates,
+            allow_duplicate_reply,
+        ) in enumerate(categories):
             with self.subTest(category=index):
                 context = SimpleNamespace(
                     application=SimpleNamespace(bot_data={}),
@@ -1702,7 +1709,7 @@ class BotTests(unittest.TestCase):
                 ):
                     asyncio.run(scenario())
 
-                ocr.assert_awaited_once()
+                self.assertEqual(ocr.await_count, 2)
                 calls = context.bot.send_message.await_args_list
                 self.assertEqual(len(calls), 2)
                 texts = [call.kwargs["text"] for call in calls]
@@ -1710,26 +1717,21 @@ class BotTests(unittest.TestCase):
                     text for text in texts
                     if text.startswith("⚠️ DUPLICATE IMAGE DETECTED!")
                 ]
-                self.assertEqual(len(warnings), 1)
-                self.assertEqual(
-                    warnings[0],
-                    "⚠️ DUPLICATE IMAGE DETECTED!\n\n"
-                    "🆔 User ID: 501\n\n"
-                    "🗑️ Your repeated image has been deleted.\n\n"
-                    "⏳ Please wait 5 minutes before sending the same image again.\n\n"
-                    "◆ THANK YOU FOR YOUR COOPERATION!",
-                )
+                self.assertEqual(len(warnings), 0 if allow_duplicate_reply else 1)
                 self.assertEqual(
                     sum(text in category_templates for text in texts),
-                    1,
+                    2 if allow_duplicate_reply else 1,
                 )
-                context.bot.delete_message.assert_awaited_once()
-                self.assertIn(
-                    context.bot.delete_message.await_args.kwargs["message_id"],
-                    {update.effective_message.message_id for update in updates},
-                )
+                if allow_duplicate_reply:
+                    context.bot.delete_message.assert_not_awaited()
+                else:
+                    context.bot.delete_message.assert_awaited_once()
+                    self.assertIn(
+                        context.bot.delete_message.await_args.kwargs["message_id"],
+                        {update.effective_message.message_id for update in updates},
+                    )
 
-    def test_five_repeated_image_uploads_run_ocr_only_once(self):
+    def test_five_repeated_locked_image_uploads_each_receive_a_reply(self):
         context = SimpleNamespace(
             application=SimpleNamespace(bot_data={}),
             bot=SimpleNamespace(
@@ -1780,35 +1782,24 @@ class BotTests(unittest.TestCase):
         ):
             asyncio.run(scenario())
 
-        ocr.assert_awaited_once()
+        self.assertEqual(ocr.await_count, 5)
         calls = context.bot.send_message.await_args_list
         self.assertEqual(len(calls), 5)
-        self.assertEqual(
-            sum(
-                call.kwargs["text"].startswith("⚠️ DUPLICATE IMAGE DETECTED!")
-                for call in calls
-            ),
-            4,
+        self.assertTrue(
+            all(call.kwargs["text"] in bot.ORDER_IMAGE_REPLIES for call in calls)
         )
-        self.assertEqual(context.bot.delete_message.await_count, 4)
-        deleted_message_ids = {
-            call.kwargs["message_id"]
-            for call in context.bot.delete_message.await_args_list
-        }
-        self.assertEqual(deleted_message_ids, {901, 902, 903, 904})
-        self.assertNotIn(900, deleted_message_ids)
-        for call in calls:
-            if call.kwargs["text"].startswith("⚠️ DUPLICATE IMAGE DETECTED!"):
-                self.assertEqual(call.kwargs["text"].splitlines()[2], "🆔 User ID: 901")
+        self.assertEqual(
+            [call.kwargs["reply_to_message_id"] for call in calls],
+            [900, 901, 902, 903, 904],
+        )
+        context.bot.delete_message.assert_not_awaited()
 
     def test_duplicate_warning_reports_failed_delete_without_false_claim(self):
         from telegram.error import Forbidden
 
-        order_ocr = (
-            "Transition Information Task ID po_942159179 Order ID 6AF9EB19000F "
-            "UTR 631922777297 Payer VPA wallet@upi Payer Card ID 942159179 "
-            "Payee Account 2697 Payee Name Nithin Payee IFSC 0151 "
-            "Amount 330.00 Locking"
+        pending_ocr = (
+            "Withdrawal Pending transaction 100.00 Quota 100.00 "
+            "Balance 27.00"
         )
         context = SimpleNamespace(
             application=SimpleNamespace(bot_data={}),
@@ -1837,7 +1828,7 @@ class BotTests(unittest.TestCase):
             ), patch.object(
                 bot,
                 "_read_screenshot_text",
-                new=AsyncMock(return_value=order_ocr),
+                new=AsyncMock(return_value=pending_ocr),
             ):
                 await bot.group_screenshot_handler(make_update(910), context)
                 await bot.group_screenshot_handler(make_update(911), context)
@@ -1858,11 +1849,9 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("Your repeated image has been deleted", warning)
 
     def test_duplicate_photo_is_deleted_in_private_chat(self):
-        order_ocr = (
-            "Transition Information Task ID po_942159179 Order ID 6AF9EB19000F "
-            "UTR 631922777297 Payer VPA wallet@upi Payer Card ID 942159179 "
-            "Payee Account 2697 Payee Name Nithin Payee IFSC 0151 "
-            "Amount 330.00 Locking"
+        pending_ocr = (
+            "Withdrawal Pending transaction 100.00 Quota 100.00 "
+            "Balance 27.00"
         )
         context = SimpleNamespace(
             application=SimpleNamespace(bot_data={}),
@@ -1891,7 +1880,7 @@ class BotTests(unittest.TestCase):
             ), patch.object(
                 bot,
                 "_read_screenshot_text",
-                new=AsyncMock(return_value=order_ocr),
+                new=AsyncMock(return_value=pending_ocr),
             ):
                 await bot.group_screenshot_handler(make_update(920), context)
                 await bot.group_screenshot_handler(make_update(921), context)

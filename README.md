@@ -39,9 +39,11 @@ The bot does not perform, accelerate, or verify withdrawals. Boost replies are a
    The per-user exact-image cooldown defaults to 300 seconds and can be set with
    `SCREENSHOT_IMAGE_COOLDOWN_SECONDS`. Non-default values require the
    three-argument Supabase RPC overload provided by the cooldown configuration
-   or recovery migration. A reservation is made before OCR to suppress
-   concurrent duplicate uploads; if an image is ignored or its reply fails, the
-   reservation is released so the same image can be retried.
+   or recovery migration. Exact repeats are checked with OCR: confirmed
+   `ORDER_LOCKED` and `WITHDRAWAL_LOCKED` images still receive a reply, while
+   other repeated images retain the duplicate warning/deletion behavior.
+   Reservations for ignored images or failed replies are released so they can
+   be retried.
    The Docker image
    installs Tesseract at `/usr/bin/tesseract` and runs an actual generated-image
    OCR smoke test during the build; local hosts need Tesseract available on
@@ -58,7 +60,9 @@ The bot does not perform, accelerate, or verify withdrawals. Boost replies are a
    [Supabase cooldown migration and verification](#supabase-cooldown-migration-and-verification).
    The first provides persistent per-message processing
    claims; the second atomically tracks exact-image SHA-256 cooldowns per
-   Telegram user for five minutes. Until the cooldown migration is applied,
+   Telegram user for five minutes. Confirmed locked order and withdrawal
+   images still receive replies when repeated; other duplicates follow the
+   cooldown behavior. Until the cooldown migration is applied,
    the bot logs the Supabase RPC failure and falls back to local SQLite, which
    does not provide cross-instance persistence.
 
@@ -130,9 +134,10 @@ Expect signatures `(p_user_id bigint, p_image_hash text)` and
 `(p_user_id bigint, p_image_hash text, p_cooldown_seconds integer)`, each
 returning `boolean`. This checks PostgreSQL registration, not the PostgREST API
 or service-role grants. After applying SQL, restart the bot with the server-only
-Supabase credentials, send the same image twice as the same test user, and
-confirm the logs no longer report `PGRST202` and the second image follows the
-duplicate path. Do not paste credentials into logs or chat.
+Supabase credentials, send the same non-locking image twice as the same test
+user, and confirm the logs no longer report `PGRST202` and the second image
+follows the duplicate path. Confirmed locked order and withdrawal images reply
+even when repeated. Do not paste credentials into logs or chat.
 
 ## Render Docker deployment
 
@@ -171,7 +176,7 @@ Function/Cron setup is optional and has its own instructions below.
 - `supabase/schema.sql` is the full SQL Editor setup. `supabase/migrations/` contains additive migrations.
 - `supabase/functions/daily-question-report/` and `supabase/schedule_daily_report.sql` implement hosted report generation and delivery, independent of the Python bot process.
 
-The classifier uses explicit support/question indicators instead of treating every unknown sentence as an unanswered question. Question analytics use deterministic local rules and run after the bot reply. Telegram privacy mode is enabled by default and can prevent the bot from receiving ordinary group photos. For group screenshots, add the bot as an admin or in BotFather open `/setprivacy`, select this bot, choose `Disable`, then remove and re-add it to each target group. A private-chat image test bypasses this group setting. Group collection also depends on bot membership and permission to send messages. Screenshot replies require transaction-specific OCR evidence; generic dashboard terms such as `Withdraw`, `Wallet`, and `Balance` do not qualify. If Gemini Vision is configured, it must independently confirm the OCR category and confidence threshold before a template is sent. Replies use `reply_to_message_id` and are atomically deduplicated by chat and message ID. Duplicate images are detected by exact SHA-256 bytes scoped to the sender's Telegram user ID across chats; the repeated message alone is deleted and receives an ID-bearing warning. Resized or recompressed images are treated as different images.
+The classifier uses explicit support/question indicators instead of treating every unknown sentence as an unanswered question. Question analytics use deterministic local rules and run after the bot reply. Telegram privacy mode is enabled by default and can prevent the bot from receiving ordinary group photos. For group screenshots, add the bot as an admin or in BotFather open `/setprivacy`, select this bot, choose `Disable`, then remove and re-add it to each target group. A private-chat image test bypasses this group setting. Group collection also depends on bot membership and permission to send messages. Screenshot replies require transaction-specific OCR evidence; generic dashboard terms such as `Withdraw`, `Wallet`, and `Balance` do not qualify. If Gemini Vision is configured, it must independently confirm the OCR category and confidence threshold before a template is sent. Replies use `reply_to_message_id` and are atomically deduplicated by chat and message ID. Exact duplicate images are tracked by SHA-256 per sender across chats; confirmed locked order and withdrawal screens still receive replies, while other duplicates are deleted and receive an ID-bearing warning. Resized or recompressed images are treated as different images.
 
 Boost text and media captions use normalized, explicit request patterns and require a single valid six-digit UID before returning the existing randomized acknowledgment. Status questions are directed to the iPAY app or Customer Support; user text alone is never treated as proof that a Boost was applied. Boost message IDs are atomically deduplicated in the bot's local SQLite database for 30 days. `/boost <UID>` remains available with its existing five-minute per-user cooldown.
 

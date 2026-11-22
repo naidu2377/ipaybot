@@ -3484,12 +3484,31 @@ async def _delete_duplicate_screenshot(context, chat_id: int, message_id: int) -
     return True
 
 
+async def _send_duplicate_screenshot_warning(
+    context,
+    chat_id: int,
+    message_id: int,
+    user_id: int,
+) -> None:
+    deleted = await _delete_duplicate_screenshot(context, chat_id, message_id)
+    warning = _duplicate_image_warning(user_id, deleted)
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=warning)
+    except TelegramError as exc:
+        log.warning(
+            "Could not send duplicate image warning (%s)",
+            type(exc).__name__,
+        )
+
+
 async def _claim_screenshot_image_or_warn(
     context,
     chat_id: int,
     message_id: int,
     user_id: int,
     image_hash: str,
+    *,
+    defer_warning: bool = False,
 ) -> tuple[bool, bool]:
     """Return whether processing may proceed and whether a cooldown was claimed."""
     try:
@@ -3510,14 +3529,12 @@ async def _claim_screenshot_image_or_warn(
         return True, True
 
     log.info("Duplicate screenshot image detected (message_id=%s)", message_id)
-    deleted = await _delete_duplicate_screenshot(context, chat_id, message_id)
-    warning = _duplicate_image_warning(user_id, deleted)
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=warning)
-    except TelegramError as exc:
-        log.warning(
-            "Could not send duplicate image warning (%s)",
-            type(exc).__name__,
+    if not defer_warning:
+        await _send_duplicate_screenshot_warning(
+            context,
+            chat_id,
+            message_id,
+            user_id,
         )
     return False, False
 
@@ -3727,6 +3744,7 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
         )
 
     cooldown_claimed = False
+    duplicate_image = False
 
     async def release_image_cooldown(reason: str) -> None:
         nonlocal cooldown_claimed
@@ -3756,6 +3774,14 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
             )
         cooldown_claimed = False
 
+    async def warn_for_duplicate_image() -> None:
+        await _send_duplicate_screenshot_warning(
+            context,
+            chat.id,
+            message.message_id,
+            user_id,
+        )
+
     if user_id is not None and image_hash is not None:
         allowed, cooldown_claimed = await _claim_screenshot_image_or_warn(
             context,
@@ -3763,9 +3789,10 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
             message.message_id,
             user_id,
             image_hash,
+            defer_warning=True,
         )
         if not allowed:
-            return
+            duplicate_image = True
 
     ocr_text = await _read_screenshot_text(message, context, image_bytes)
     if not ocr_text:
@@ -3775,6 +3802,9 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
             chat.id,
             message.message_id,
         )
+        if duplicate_image:
+            await warn_for_duplicate_image()
+            return
         await release_image_cooldown("unreadable_ocr")
         return
     normalized_ocr_text = re.sub(r"[^a-z0-9]+", " ", ocr_text.casefold())
@@ -3800,6 +3830,9 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
         visual_locking_stamp=visual_locking_stamp,
     )
     if not category:
+        if duplicate_image:
+            await warn_for_duplicate_image()
+            return
         if _is_technical_error_screenshot(ocr_text):
             log.info(
                 "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, "
@@ -3871,6 +3904,9 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
                 chat.id,
                 message.message_id,
             )
+            if duplicate_image:
+                await warn_for_duplicate_image()
+                return
             await release_image_cooldown("vision_not_confirmed")
             return
         if vision_confirmed is None:
@@ -3880,6 +3916,17 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
                 chat.id,
                 message.message_id,
             )
+    if duplicate_image and category not in {"order", "withdrawal"}:
+        await warn_for_duplicate_image()
+        return
+    if duplicate_image:
+        log.info(
+            "Allowing repeated locked screenshot reply "
+            "(chat_id=%s, message_id=%s, category=%s)",
+            chat.id,
+            message.message_id,
+            category,
+        )
     log.info(
         "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, category=%s)",
         chat.id,
