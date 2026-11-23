@@ -4238,6 +4238,22 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
     facts = _extract_screenshot_facts(ocr_text)
     domain = _detect_screenshot_domain(ocr_text, caption=caption)
 
+    if (
+        category is None
+        and not caption
+        and _is_order_payment_task_layout(ocr_text)
+        and not facts.get("utr")
+        and not facts.get("status")
+    ):
+        log.info(
+            "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, "
+            "category=UNKNOWN_SCREEN, reason=uncompleted_payment_task)",
+            chat.id,
+            message.message_id,
+        )
+        await release_image_cooldown("uncompleted_payment_task")
+        return
+
     gemini_client = context.application.bot_data.get("gemini_client")
     guide: Guide = context.application.bot_data.get("guide")
 
