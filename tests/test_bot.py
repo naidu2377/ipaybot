@@ -3822,6 +3822,20 @@ class BotTests(unittest.TestCase):
         self.assertTrue(bot._is_group_message_for_bot(mentioned_message, bot_user))
         self.assertFalse(bot._is_group_message_for_bot(unrelated_message, bot_user))
         self.assertTrue(bot._is_group_message_for_bot(reply_message, bot_user))
+        self.assertTrue(
+            bot._is_group_message_for_bot(
+                SimpleNamespace(
+                    text="Please help with my order",
+                    entities=[
+                        SimpleNamespace(
+                            type="text_mention",
+                            user=SimpleNamespace(id=777),
+                        )
+                    ],
+                ),
+                bot_user,
+            )
+        )
 
     def test_mentioned_group_question_gets_an_isolated_reply(self):
         message = SimpleNamespace(
@@ -3865,37 +3879,116 @@ class BotTests(unittest.TestCase):
         self.assertEqual(add_message.call_args_list[0].args[0], conversation_id)
         self.assertIn("Check the payment status.", message.reply_text.await_args.args[0])
 
-    def test_unaddressed_ipay_group_question_gets_a_reply(self):
+    def test_group_reply_to_bot_message_gets_a_response(self):
         message = SimpleNamespace(
-            text="My deposit is delayed",
-            message_id=502,
+            text="I tried that, what next?",
+            message_id=504,
+            reply_to_message=SimpleNamespace(
+                text="Relink your wallet in the iPAY app.",
+                from_user=SimpleNamespace(id=777, is_bot=True),
+            ),
             reply_text=AsyncMock(),
         )
         update = SimpleNamespace(
             effective_message=message,
             effective_user=SimpleNamespace(id=123),
-            effective_chat=SimpleNamespace(type=bot.ChatType.GROUP, id=-42),
+            effective_chat=SimpleNamespace(type=bot.ChatType.GROUP, id=-10043),
         )
         context = SimpleNamespace(
             bot=SimpleNamespace(id=777, username="ipaybot"),
             application=SimpleNamespace(
-                bot_data={
-                    "guide": self.make_guide(),
-                    "last_message_at": {},
-                }
+                bot_data={"guide": self.make_guide(), "last_message_at": {}}
             ),
         )
         with (
-            patch.object(bot, "DB_PATH", self.root / "group-settings.sqlite3"),
             patch.object(
                 bot,
                 "_ai_answer",
-                new=AsyncMock(return_value=("Check the order status.", [])),
+                new=AsyncMock(return_value=("Check whether the wallet is now linked.", [])),
             ) as ai_answer,
+            patch.object(bot, "add_message"),
         ):
             asyncio.run(bot.ai_reply(update, context))
+
         ai_answer.assert_awaited_once()
-        self.assertIn("Check the order status.", message.reply_text.await_args.args[0])
+        self.assertIn(
+            "Relink your wallet",
+            ai_answer.await_args.args[0],
+        )
+        self.assertIn(
+            "I tried that, what next?",
+            ai_answer.await_args.args[0],
+        )
+        message.reply_text.assert_awaited_once()
+
+    def test_duplicate_ai_update_is_processed_once_concurrently(self):
+        message = SimpleNamespace(
+            text="How do I check a pending payment?",
+            message_id=505,
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            update_id=9005,
+            effective_message=message,
+            effective_user=SimpleNamespace(id=123),
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE, id=123),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={"guide": self.make_guide(), "last_message_at": {}}
+            )
+        )
+        with (
+            patch.object(
+                bot,
+                "_ai_answer",
+                new=AsyncMock(return_value=("Check the payment app status.", [])),
+            ) as ai_answer,
+            patch.object(bot, "_async_enabled_languages", new=AsyncMock(return_value=[])),
+            patch.object(bot, "_async_add_conversation_turn", new=AsyncMock()),
+            patch.object(bot, "_save_question_event", new=AsyncMock()),
+            patch.object(bot, "_matching_custom_faqs", return_value=[]),
+        ):
+            async def process_duplicate_update():
+                await asyncio.gather(
+                    bot.ai_reply(update, context),
+                    bot.ai_reply(update, context),
+                )
+
+            asyncio.run(process_duplicate_update())
+
+        ai_answer.assert_awaited_once()
+        message.reply_text.assert_awaited_once()
+
+    def test_unaddressed_group_question_is_ignored_before_retrieval(self):
+        for index, text in enumerate(
+            (
+                "My deposit is delayed",
+                "good morning everyone",
+                "Anyone watched that movie?",
+            )
+        ):
+            with self.subTest(text=text):
+                message = SimpleNamespace(
+                    text=text,
+                    message_id=502 + index,
+                    reply_text=AsyncMock(),
+                )
+                update = SimpleNamespace(
+                    effective_message=message,
+                    effective_user=SimpleNamespace(id=123),
+                    effective_chat=SimpleNamespace(type=bot.ChatType.GROUP, id=-42),
+                )
+                guide = MagicMock()
+                context = SimpleNamespace(
+                    bot=SimpleNamespace(id=777, username="ipaybot"),
+                    application=SimpleNamespace(bot_data={"guide": guide}),
+                )
+                with patch.object(bot, "_ai_answer", new=AsyncMock()) as ai_answer:
+                    asyncio.run(bot.ai_reply(update, context))
+                ai_answer.assert_not_awaited()
+                guide.retrieve.assert_not_called()
+                message.reply_text.assert_not_awaited()
 
     def test_automatic_greetings_reply_in_private_group_and_supergroup(self):
         greeting_messages = (
@@ -5586,6 +5679,49 @@ class BotTests(unittest.TestCase):
         self.assertIn("contact human support", instructions)
         self.assertIn("official group or admin DM", instructions)
 
+    def test_ai_support_prompt_requires_direct_natural_text_responses(self):
+        instructions = " ".join(bot.SYSTEM_RULES.split())
+        self.assertIn("Answer the exact question first", instructions)
+        self.assertIn("ask one short clarification question", instructions)
+        self.assertIn("Never attach or imply custom support menus", instructions)
+        self.assertIn("Use normal text by default", instructions)
+
+    def test_ai_support_prompt_requires_short_context_aware_replies(self):
+        instructions = " ".join(bot.SYSTEM_RULES.split())
+        self.assertIn("1–3 short sentences", instructions)
+        self.assertIn("complete message", instructions)
+        self.assertIn("previous relevant context", instructions)
+        self.assertIn("Ask only one necessary question", instructions)
+
+    def test_ai_api_fallback_reply_has_no_support_keyboard(self):
+        from google.genai.errors import APIError
+        guide = self.make_guide()
+        message = SimpleNamespace(
+            text="how do I fix a withdrawal problem?",
+            caption=None,
+            photo=[],
+            document=None,
+            reply_text=AsyncMock(),
+            message_id=7712,
+        )
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=992),
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE, id=992),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={"guide": guide, "gemini_client": SimpleNamespace()}
+            )
+        )
+        with (
+            patch.object(bot, "DB_PATH", self.root / "no-keyboard-fallback.sqlite3"),
+            patch.object(bot, "_ai_answer", side_effect=APIError(503, "API unavailable")),
+        ):
+            asyncio.run(bot.ai_reply(update, context))
+        kwargs = message.reply_text.await_args.kwargs
+        self.assertNotIn("reply_markup", kwargs)
+
     def test_ai_support_api_failure_fallback_for_referral_query(self):
         """When Gemini API fails on a referral query, ai_reply catches error and returns helpful fallback."""
         from google.genai.errors import APIError
@@ -5969,7 +6105,7 @@ class BotTests(unittest.TestCase):
         )
         self.assertTrue(bot._is_group_message_for_bot(drag_reply, bot_user))
 
-        # 2. Drag-reply to another bot with ipay in username
+        # A reply to a different bot is not an address to this bot.
         drag_reply_alt = SimpleNamespace(
             text="why?",
             reply_to_message=SimpleNamespace(
@@ -5977,21 +6113,26 @@ class BotTests(unittest.TestCase):
                 text="Withdrawal pending: waiting for another user.",
             ),
         )
-        self.assertTrue(bot._is_group_message_for_bot(drag_reply_alt, bot_user))
+        self.assertFalse(bot._is_group_message_for_bot(drag_reply_alt, bot_user))
 
-        # 3. Direct mention: ipaybot without @
+        # A bot name without an @ mention is ordinary group text.
         plain_mention = SimpleNamespace(
             text="ipaybot how can I invite friends?",
             reply_to_message=None,
         )
-        self.assertTrue(bot._is_group_message_for_bot(plain_mention, bot_user))
+        self.assertFalse(bot._is_group_message_for_bot(plain_mention, bot_user))
 
-        # 4. Direct mention: @ipaybot with punctuation
+        # A direct @mention is recognized, but a username prefix is not.
         tag_mention = SimpleNamespace(
             text="@ipaybot, what is minimum withdrawal?",
             reply_to_message=None,
         )
         self.assertTrue(bot._is_group_message_for_bot(tag_mention, bot_user))
+        prefixed_username = SimpleNamespace(
+            text="@ipaybotty what is minimum withdrawal?",
+            reply_to_message=None,
+        )
+        self.assertFalse(bot._is_group_message_for_bot(prefixed_username, bot_user))
 
         # 5. Unrelated group message
         unrelated = SimpleNamespace(

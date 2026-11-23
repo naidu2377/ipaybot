@@ -108,10 +108,70 @@ AI_ENABLED = os.getenv("AI_ENABLED", "true").strip().casefold() not in {
     "0", "false", "no", "off",
 }
 AI_MAX_OUTPUT_TOKENS = max(1, int(os.getenv("AI_MAX_OUTPUT_TOKENS", "700")))
-AI_TIMEOUT_SECONDS = max(1.0, float(os.getenv("AI_TIMEOUT_SECONDS", "45")))
+AI_TIMEOUT_SECONDS = max(1.0, float(os.getenv("AI_TIMEOUT_SECONDS", "15")))
 SCREENSHOT_VISION_TIMEOUT_SECONDS = max(
-    1.0, float(os.getenv("SCREENSHOT_VISION_TIMEOUT_SECONDS", "8"))
+    1.0, float(os.getenv("SCREENSHOT_VISION_TIMEOUT_SECONDS", "15"))
 )
+GEMINI_MAX_RETRIES = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
+GEMINI_REQUEST_MIN_INTERVAL = max(
+    0.2, float(os.getenv("GEMINI_REQUEST_MIN_INTERVAL", "2.0"))
+)
+_LAST_GEMINI_CALL_TIME = 0.0
+_GEMINI_CALL_LOCK = asyncio.Lock()
+
+
+async def _call_gemini_with_retry(
+    operation_name: str,
+    coro_fn: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Execute a Gemini API operation with pacing, bounded exponential backoff, and retry on 429/503."""
+    global _LAST_GEMINI_CALL_TIME
+    retries = 0
+    while True:
+        async with _GEMINI_CALL_LOCK:
+            now = time.monotonic()
+            wait = GEMINI_REQUEST_MIN_INTERVAL - (now - _LAST_GEMINI_CALL_TIME)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _LAST_GEMINI_CALL_TIME = time.monotonic()
+
+        try:
+            return await coro_fn(*args, **kwargs)
+        except genai_errors.APIError as exc:
+            code = getattr(exc, "code", None)
+            err_msg = str(exc).lower()
+            is_transient = (
+                code in {429, 503}
+                or "resource_exhausted" in err_msg
+                or "unavailable" in err_msg
+                or "high demand" in err_msg
+                or "quota" in err_msg
+            )
+            if is_transient and retries < GEMINI_MAX_RETRIES:
+                retries += 1
+                backoff_delay = min(10.0, (2.0 ** retries) + 1.0)
+                log.warning(
+                    "Gemini %s hit %s (HTTP %s). Retrying in %.1fs (attempt %d/%d)...",
+                    operation_name,
+                    type(exc).__name__,
+                    code,
+                    backoff_delay,
+                    retries,
+                    GEMINI_MAX_RETRIES,
+                )
+                await asyncio.sleep(backoff_delay)
+                continue
+            log.error(
+                "Gemini %s failed after %d retries (%s HTTP %s: %s)",
+                operation_name,
+                retries,
+                type(exc).__name__,
+                code,
+                _safe_error_detail(exc),
+            )
+            raise
 SUPPORT_1 = os.getenv("SUPPORT_1", "@Ipay800").strip()
 SUPPORT_2 = os.getenv("SUPPORT_2", "@Roas668").strip()
 SUPPORT_3 = os.getenv("SUPPORT_3", "@Ipay811").strip()
@@ -238,6 +298,8 @@ _SUPABASE_CLIENT = None
 _SUPABASE_CLIENT_LOCK = threading.Lock()
 _PROCESSED_HI_MESSAGES: Dict[Tuple[int, int], float] = {}
 _PROCESSED_HI_LOCK = threading.Lock()
+_PROCESSED_AI_MESSAGES: Dict[Tuple[str, int, int], float] = {}
+_PROCESSED_AI_LOCK = threading.Lock()
 _TESSERACT_PROCESS_LOCK = threading.Lock()
 SCREENSHOT_IMAGE_COOLDOWN_SECONDS = max(
     1,
@@ -294,6 +356,35 @@ follow-up question understanding, and accurate and professional responses.
 IMPORTANT: You are an assistant inside an existing Telegram bot. You are not the iPAY
 payment system. You do not have direct access to users' actual iPAY accounts or
 transactions unless an authorized integration explicitly provides verified information.
+
+PROFESSIONAL SUPPORT BEHAVIOR:
+- Understand short messages, spelling mistakes, informal language, English, Hindi,
+  Hinglish and Telugu. Respond in the user's preferred language.
+- Understand follow-up context and do not restart or repeat the conversation.
+- Answer the exact question first, then give only the steps or next action that are useful.
+- Acknowledge the issue briefly. Use short paragraphs and simple, direct language.
+- Avoid long introductions, repeated greetings, excessive emojis and unnecessary headings.
+- Do not guess, promise account-specific outcomes or invent policies, fees, bonuses,
+  commissions, payment confirmations or withdrawal timelines.
+- If essential information is missing, ask one short clarification question.
+- If approved information cannot resolve the issue, direct the user to authorized
+  iPAY customer support and explain what details they may provide.
+- Never attach or imply custom support menus for ordinary conversational replies.
+- Use normal text by default. A menu or button is appropriate only for an explicit
+  menu request or an existing workflow that genuinely requires a selection.
+- Check previous steps before suggesting them again, and do not provide conflicting solutions.
+
+SHORT-REPLY TRAINING:
+- Keep normal replies to 1–3 short sentences whenever possible.
+- Understand incomplete or informal wording from the complete message, not from isolated keywords.
+- Identify the user's actual problem before choosing a solution.
+- Do not give a broad withdrawal, wallet or payment explanation when the issue is specific.
+- Do not provide multiple unrelated solutions or repeat troubleshooting already mentioned.
+- For a follow-up such as "I tried it", "Still not working", "What next?", "Why?",
+  "How to fix?", "Same problem" or "It failed again", use the previous relevant context.
+- Do not ask the user to restate information already available in the conversation.
+- Ask only one necessary question. If the issue is clear, give the next useful step instead.
+- Explain detailed steps only when detailed steps are genuinely required.
 
 ==================================================
 LANGUAGE AND COMMUNICATION
@@ -1933,8 +2024,9 @@ def _contains_sensitive_input(text: str) -> bool:
 
 
 def _extract_entity_text(message, entity) -> str:
+    text = getattr(message, "text", None) or getattr(message, "caption", "") or ""
     if hasattr(entity, "extract") and callable(entity.extract):
-        return str(entity.extract(getattr(message, "text", "") or ""))
+        return str(entity.extract(text))
     if hasattr(message, "parse_entity") and callable(message.parse_entity):
         try:
             return str(message.parse_entity(entity))
@@ -1945,7 +2037,6 @@ def _extract_entity_text(message, entity) -> str:
             return str(message.parse_caption_entity(entity))
         except Exception:
             pass
-    text = getattr(message, "text", "") or getattr(message, "caption", "") or ""
     offset = getattr(entity, "offset", 0)
     length = getattr(entity, "length", 0)
     return text[offset : offset + length]
@@ -1964,34 +2055,65 @@ def _is_group_message_for_bot(message, bot) -> bool:
         if bot_username and getattr(sender, "username", None):
             if sender.username.casefold() == bot_username.casefold():
                 return True
-        if getattr(sender, "is_bot", False):
-            sender_name = (getattr(sender, "username", "") or getattr(sender, "first_name", "")).casefold()
-            if "ipay" in sender_name:
-                return True
 
     text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
-    text_lower = text.casefold()
-
-    # 2. Direct @mention of bot username
     if bot_username:
-        expected_mention = f"@{bot_username}".casefold()
-        if expected_mention in text_lower:
+        expected_mention = re.compile(
+            rf"(?<![\w])@{re.escape(bot_username)}(?![\w])",
+            re.IGNORECASE,
+        )
+        if expected_mention.search(text):
             return True
 
-    # 3. Direct mention or tag of ipaybot, @ipaybot, ipay bot, ipay_bot
-    if re.search(r"@?\bipay(?:_?bot)?\b", text_lower):
-        return True
-
-    # 4. Telegram mention entity check
     entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
     for entity in entities:
-        if getattr(entity, "type", None) == "mention":
+        entity_type = getattr(entity, "type", None)
+        entity_type = getattr(entity_type, "value", entity_type)
+        if entity_type == "text_mention":
+            mentioned_user = getattr(entity, "user", None)
+            if bot_id is not None and getattr(mentioned_user, "id", None) == bot_id:
+                return True
+        elif entity_type == "mention":
             val = _extract_entity_text(message, entity).strip().casefold()
             if bot_username and val == f"@{bot_username}".casefold():
                 return True
-            if val in {"@ipaybot", "@ipay_bot", "@ipay"}:
-                return True
     return False
+
+
+def _claim_ai_message(
+    chat_id: int,
+    message_id: Optional[int],
+    update_id: Optional[int],
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    keys: List[Tuple[str, int, int]] = []
+    if message_id is not None:
+        keys.append(("message", chat_id, message_id))
+    if update_id is not None:
+        keys.append(("update", 0, update_id))
+    if not keys:
+        return True
+
+    application = getattr(context, "application", None)
+    bot_data = (
+        getattr(application, "bot_data", None)
+        if application
+        else getattr(context, "bot_data", None)
+    )
+    now = time.monotonic()
+    with _PROCESSED_AI_LOCK:
+        if isinstance(bot_data, dict):
+            processed = bot_data.setdefault("processed_ai_messages", {})
+        else:
+            processed = _PROCESSED_AI_MESSAGES
+        for key, timestamp in list(processed.items()):
+            if now - timestamp >= 180:
+                processed.pop(key, None)
+        if any(key in processed for key in keys):
+            return False
+        for key in keys:
+            processed[key] = now
+    return True
 
 
 def _group_conversation_id(
@@ -2935,8 +3057,8 @@ async def _gemini_confirms_screenshot_category(
         vision_image = await asyncio.to_thread(
             _prepare_screenshot_for_vision, image_bytes
         )
-        response = await asyncio.wait_for(
-            gemini_client.aio.models.generate_content(
+        async def _call_content():
+            return await gemini_client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[
                     genai_types.Part.from_bytes(
@@ -2955,7 +3077,9 @@ async def _gemini_confirms_screenshot_category(
                     temperature=0,
                     max_output_tokens=300,
                 ),
-            ),
+            )
+        response = await asyncio.wait_for(
+            _call_gemini_with_retry("screenshot_confirmation", _call_content),
             timeout=SCREENSHOT_VISION_TIMEOUT_SECONDS,
         )
         payload = json.loads(getattr(response, "text", "") or "")
@@ -3033,6 +3157,237 @@ async def _gemini_confirms_screenshot_category(
     ):
         return False
     return True
+
+
+def _extract_screenshot_facts(ocr_text: str) -> Dict[str, Any]:
+    """Extract visible facts such as UTR, Order ID, Amount, Status, and App Name from OCR text."""
+    facts: Dict[str, Any] = {
+        "utr": None,
+        "order_id": None,
+        "amount": None,
+        "status": None,
+        "app_name": None,
+    }
+    if not ocr_text:
+        return facts
+
+    utr_match = re.search(
+        r"(?i)\b(?:utr|upi\s*ref(?:erence)?(?:\s*no)?|ref(?:\s*no)?|rrn|txn\s*(?:id|no)|transaction\s*id)[:\s#]*([0-9]{12})\b",
+        ocr_text,
+    )
+    if not utr_match and re.search(r"(?i)\b(?:upi|ref|payment|transferred|phonepe|paytm|gpay)\b", ocr_text):
+        standalone_utr = re.search(r"\b([0-9]{12})\b", ocr_text)
+        if standalone_utr:
+            utr_match = standalone_utr
+    if utr_match:
+        facts["utr"] = utr_match.group(1)
+
+    order_match = re.search(
+        r"(?i)\b(?:order\s*(?:id|no|num)|order)[:\s#]*([A-Za-z0-9_-]{6,30})\b",
+        ocr_text,
+    )
+    if order_match and order_match.group(1).lower() not in {"details", "status", "locking", "locked", "pending"}:
+        facts["order_id"] = order_match.group(1)
+
+    amount_match = re.search(
+        r"(?i)(?:₹|rs\.?|inr)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
+        ocr_text,
+    )
+    if amount_match:
+        facts["amount"] = amount_match.group(1).replace(",", "")
+
+    status_match = re.search(
+        r"(?i)\b(successful|success|completed|failed|failure|pending|processing|locked|locking|rejected)\b",
+        ocr_text,
+    )
+    if status_match:
+        facts["status"] = status_match.group(1).title()
+
+    for app in ["PhonePe", "Paytm", "Google Pay", "GPay", "MobiKwik", "Freecharge", "BHIM", "iPAY"]:
+        if re.search(rf"(?i)\b{re.escape(app)}\b", ocr_text):
+            facts["app_name"] = app
+            break
+
+    return facts
+
+
+def _detect_screenshot_domain(ocr_text: str, caption: str = "") -> str:
+    """Identify the domain of a screenshot based on OCR text and caption."""
+    combined = f"{ocr_text} {caption}".casefold()
+
+    if re.search(
+        r"(?i)\b(phonepe|paytm|google\s*pay|gpay|mobikwik|paid\s*to|"
+        r"debited\s*from|transferred\s*to|payment\s*(?:successful|failed|pending)|"
+        r"transaction\s*(?:successful|failed)|transfer\s*details|banking\s*name|"
+        r"recharge|payment\s*receipt|bills\s*section)\b",
+        combined,
+    ):
+        return "payment"
+
+    if re.search(
+        r"(?i)\b(wallet|bind\s*wallet|relink\s*wallet|add\s*wallet|tools\s*section|"
+        r"wallet\s*locked|abnormal\s*connection|balance\s*wrong|points\s*not\s*showing)\b",
+        combined,
+    ):
+        return "wallet"
+
+    if _is_technical_error_screenshot(ocr_text) or re.search(
+        r"(?i)\b(network\s*(?:error|timeout|unavailable)|app\s*crash|an\s*error\s*occurred|"
+        r"something\s*went\s*wrong|server\s*busy|try\s*again\s*later)\b",
+        combined,
+    ):
+        return "technical_error"
+
+    if re.search(r"(?i)\b(referral|bonus\s*banner|invite|invitation)\b", combined):
+        return "referral"
+
+    return "unknown"
+
+
+def _format_payment_screenshot_reply(facts: Dict[str, Any], caption: str = "") -> str:
+    checks = []
+    if facts.get("app_name"):
+        checks.append(f"• Payment platform detected: {facts['app_name']}")
+    if facts.get("amount"):
+        checks.append(f"• Visible amount: ₹{facts['amount']}")
+    if facts.get("utr"):
+        checks.append(f"• Visible UTR / Ref No: {facts['utr']}")
+    if facts.get("status"):
+        checks.append(f"• Visible status: {facts['status']}")
+    if not checks:
+        checks.append("• Payment transaction / deposit receipt detected.")
+    checks_str = "\n".join(checks)
+
+    return (
+        f"{ICON_PIN} <b>iPAY – Payment Verification Guidance</b>\n\n"
+        f"{ICON_ARROW} <b>ISSUE IDENTIFIED:</b>\n"
+        f"Payment or deposit transaction screenshot received.\n\n"
+        f"{ICON_ARROW} <b>IMPORTANT CHECKS:</b>\n"
+        f"{checks_str}\n"
+        f"• Verify whether the payment shows 'Successful', 'Pending', or 'Failed' in your banking app.\n"
+        f"• Check the <b>Bills</b> section in the iPAY app to confirm whether points have been credited.\n\n"
+        f"🎯 <b>WHAT TO DO:</b>\n"
+        f"1. <b>If Pending in your payment app:</b> Wait for your bank to clear or settle the payment.\n"
+        f"2. <b>If Successful in banking app but not credited:</b> Wait up to 2 hours for payment gateway synchronization.\n"
+        f"3. <b>If still uncredited after 2 hours:</b> Contact Customer Support ({SUPPORT_1} / {SUPPORT_2} / {SUPPORT_3}) with your UID, Order ID, and this payment screenshot showing the 12-digit UTR.\n"
+        f"4. <b>Supported pay-in wallets:</b> PhonePe, Paytm, MobiKwik, Freecharge.\n\n"
+        f"{CE_WARN} <b>IMPORTANT NOTE:</b>\n"
+        f"A screenshot alone does not guarantee bank credit until confirmed in system records. Never share your passwords, OTPs, or UPI PINs with anyone.\n\n"
+        f"◆ CHECK • VERIFY • STAY UPDATED!"
+    )
+
+
+def _format_wallet_screenshot_reply(facts: Dict[str, Any], caption: str = "") -> str:
+    return (
+        f"{ICON_PIN} <b>iPAY – Wallet Connection & Locking Guidance</b>\n\n"
+        f"{ICON_ARROW} <b>ISSUE IDENTIFIED:</b>\n"
+        f"Wallet connection or management screen detected.\n\n"
+        f"{ICON_ARROW} <b>IMPORTANT CHECKS:</b>\n"
+        f"• Bound wallets cannot be permanently deleted from an account; you can log out.\n"
+        f"• Wallet locking occurs due to multiple failed orders, rate limitations, or unstable connections.\n\n"
+        f"🎯 <b>WHAT TO DO:</b>\n"
+        f"1. <b>Add Wallet:</b> Open iPAY App → Tools section below the navigation bar → click 'Add' and bind your wallet.\n"
+        f"2. <b>Connection Failed / Relink:</b> Go to the relevant section in the app and click 'Relink' to re-establish the connection.\n"
+        f"3. <b>Check Balance:</b> Visit the Bills section in the app to verify points and transactions.\n"
+        f"4. <b>Locked Wallet:</b> Allow up to 24 hours for system auto-clear.\n"
+        f"5. If unresolved after 24 hours, contact Customer Support with your UID.\n\n"
+        f"{CE_WARN} <b>IMPORTANT NOTE:</b>\n"
+        f"Never share your account password, OTP, or UPI PIN with anyone.\n\n"
+        f"◆ CHECK • VERIFY • STAY UPDATED!"
+    )
+
+
+SCREENSHOT_AI_SYSTEM_PROMPT = (
+    "You are the official iPAY AI customer support specialist.\n"
+    "Your task is to analyze user-uploaded screenshots (payment receipts, order locks, "
+    "withdrawal screens, wallet connections, or app errors) and the user's question/caption, "
+    "and provide an accurate, clear, and reassuring resolution based on official iPAY rules.\n\n"
+    "CRITICAL ACCURACY RULES:\n"
+    "1. Distinguish VISIBLE screenshot facts from verified reality. State clearly what is shown in the image "
+    "(e.g., 'Visible UTR: ...', 'Payment status shown: Success/Pending'), but remind the user that official credit "
+    "status is verified through the iPAY app (Bills section) or customer support.\n"
+    "2. NEVER invent bank verification, fake transaction approvals, or unverified claims.\n"
+    "3. If the image is blurry, cropped, or unreadable, politely ask the user for a clearer screenshot.\n"
+    "4. Address the user's specific caption or question directly.\n"
+    "5. Use the provided verified iPAY knowledge base excerpts to guide your steps.\n\n"
+    "REQUIRED RESPONSE FORMAT:\n"
+    "📌 iPAY – [ISSUE TITLE]\n\n"
+    "➡️ ISSUE IDENTIFIED:\n"
+    "[Clear 1-2 sentence description of what is visible in the screenshot and the user's issue]\n\n"
+    "➡️ IMPORTANT CHECKS:\n"
+    "• [Visible facts: UTR, Amount, Order ID, or Status if found]\n"
+    "• [Key condition or verification status]\n\n"
+    "🎯 WHAT TO DO:\n"
+    "1. [Actionable step 1 from official iPAY rules]\n"
+    "2. [Actionable step 2]\n\n"
+    "⚠️ IMPORTANT NOTE:\n"
+    "[Safety disclaimer: Check Bills section in iPAY app. Never share passwords, OTPs, or UPI PINs with anyone.]\n\n"
+    "◆ CHECK • VERIFY • STAY UPDATED!"
+)
+
+
+async def _gemini_analyze_screenshot(
+    gemini_client: genai.Client,
+    image_bytes: bytes,
+    ocr_text: str,
+    caption: str,
+    guide: Guide,
+    facts: Optional[Dict[str, Any]] = None,
+    domain: str = "unknown",
+) -> Optional[str]:
+    """Analyze a user screenshot using Gemini Vision and retrieve verified iPAY knowledge."""
+    if not gemini_client:
+        return None
+    facts = facts or _extract_screenshot_facts(ocr_text)
+    vision_query = f"{domain} {caption} {ocr_text[:300]}".strip()
+    knowledge_pages = (
+        guide.retrieve_knowledge(vision_query, top_k=2)
+        if hasattr(guide, "retrieve_knowledge")
+        else []
+    )
+    knowledge_context = "\n\n".join(
+        f"Verified Source ({p.source_label}):\n{p.text}"
+        for p in knowledge_pages
+    ) if knowledge_pages else "No specific excerpt found. Follow standard official iPAY policies."
+
+    prompt = (
+        f"User Caption / Question: {caption or 'None provided'}\n"
+        f"Detected Domain: {domain}\n"
+        f"Extracted Facts: {json.dumps(facts)}\n"
+        f"Extracted OCR Text: {ocr_text[:1000] if ocr_text else 'None'}\n\n"
+        f"Official iPAY Knowledge Excerpts:\n"
+        f"{knowledge_context}\n\n"
+        "Carefully examine this screenshot and user question. If the image is completely unreadable or blank, ask for a clearer screenshot. "
+        "Distinguish visible facts from bank verification. Provide an accurate, helpful resolution in the required iPAY format."
+    )
+
+    try:
+        vision_image = await asyncio.to_thread(_prepare_screenshot_for_vision, image_bytes)
+        async def _call_vision():
+            return await gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[
+                    genai_types.Part.from_bytes(
+                        data=vision_image,
+                        mime_type="image/jpeg",
+                    ),
+                    prompt,
+                ],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=SCREENSHOT_AI_SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=700,
+                ),
+            )
+        response = await asyncio.wait_for(
+            _call_gemini_with_retry("vision_analysis", _call_vision),
+            timeout=SCREENSHOT_VISION_TIMEOUT_SECONDS,
+        )
+        answer = getattr(response, "text", "") or ""
+        return answer.strip() if answer else None
+    except Exception as exc:
+        log.warning("Gemini screenshot vision analysis failed (%s)", type(exc).__name__)
+        return None
 
 
 async def _download_screenshot_bytes(message, context) -> Optional[bytes]:
@@ -3879,11 +4234,51 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
         ocr_text,
         visual_locking_stamp=visual_locking_stamp,
     )
+    caption = (getattr(message, "caption", None) or "").strip()
+    facts = _extract_screenshot_facts(ocr_text)
+    domain = _detect_screenshot_domain(ocr_text, caption=caption)
+
+    gemini_client = context.application.bot_data.get("gemini_client")
+    guide: Guide = context.application.bot_data.get("guide")
+
+    strict_locked_match = (
+        category in {"order", "withdrawal"}
+        and _classify_locked_screenshot(
+            ocr_text,
+            visual_locking_stamp=visual_locking_stamp,
+        )
+        == category
+    )
+
+    # When Gemini Vision is active and user provided a caption or it's a domain-specific issue (payment, wallet):
+    if gemini_client and (caption or domain in {"payment", "wallet"} or (category and caption)):
+        vision_reply = await _gemini_analyze_screenshot(
+            gemini_client,
+            image_bytes,
+            ocr_text,
+            caption,
+            guide,
+            facts=facts,
+            domain=category or domain,
+        )
+        if vision_reply:
+            if duplicate_image and category not in {"order", "withdrawal"}:
+                await warn_for_duplicate_image()
+                return
+            try:
+                await _reply_to_screenshot(context, chat.id, message.message_id, vision_reply)
+            except TelegramError as exc:
+                log.warning("SCREENSHOT REPLY FAILED (vision send: %s)", type(exc).__name__)
+                await release_image_cooldown("vision_reply_failed")
+            else:
+                log.info("Sent Gemini vision screenshot reply (chat_id=%s, message_id=%s)", chat.id, message.message_id)
+            return
+
     if not category:
         if duplicate_image:
             await warn_for_duplicate_image()
             return
-        if _is_technical_error_screenshot(ocr_text):
+        if _is_technical_error_screenshot(ocr_text) or domain == "technical_error":
             log.info(
                 "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, "
                 "category=TECHNICAL_ERROR_SCREEN)",
@@ -3915,6 +4310,53 @@ async def group_screenshot_handler(update: Update, context: ContextTypes.DEFAULT
                     message.message_id,
                 )
             return
+
+        if domain == "payment":
+            log.info(
+                "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, category=PAYMENT_SCREEN)",
+                chat.id,
+                message.message_id,
+            )
+            payment_reply = _format_payment_screenshot_reply(facts, caption)
+            try:
+                await _reply_to_screenshot(context, chat.id, message.message_id, payment_reply)
+            except TelegramError as exc:
+                log.warning("SCREENSHOT REPLY FAILED (payment_send: %s)", type(exc).__name__)
+                await release_image_cooldown("payment_reply_failed")
+            else:
+                log.info("Sent payment screenshot guidance (chat_id=%s, message_id=%s)", chat.id, message.message_id)
+            return
+
+        if domain == "wallet":
+            log.info(
+                "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, category=WALLET_SCREEN)",
+                chat.id,
+                message.message_id,
+            )
+            wallet_reply = _format_wallet_screenshot_reply(facts, caption)
+            try:
+                await _reply_to_screenshot(context, chat.id, message.message_id, wallet_reply)
+            except TelegramError as exc:
+                log.warning("SCREENSHOT REPLY FAILED (wallet_send: %s)", type(exc).__name__)
+                await release_image_cooldown("wallet_reply_failed")
+            else:
+                log.info("Sent wallet screenshot guidance (chat_id=%s, message_id=%s)", chat.id, message.message_id)
+            return
+
+        if caption and guide:
+            log.info(
+                "Replying to screenshot caption with guide knowledge (chat_id=%s, message_id=%s)",
+                chat.id,
+                message.message_id,
+            )
+            fallback_answer = _ai_unavailable_answer(caption, guide)
+            try:
+                await _reply_to_screenshot(context, chat.id, message.message_id, fallback_answer)
+            except TelegramError as exc:
+                log.warning("SCREENSHOT REPLY FAILED (caption fallback: %s)", type(exc).__name__)
+                await release_image_cooldown("caption_fallback_failed")
+            return
+
         log.info(
             "CLASSIFICATION RESULT (chat_id=%s, message_id=%s, "
             "category=UNKNOWN_SCREEN, action=IGNORE)",
@@ -4393,7 +4835,6 @@ async def handle_uid_notice(
     )
     await message.reply_text(
         notice_text,
-        reply_markup=notice_keyboard(),
         parse_mode="HTML",
     )
 
@@ -5193,17 +5634,13 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         if pages and pages[0].image_path and user_wants_guide_image:
             await _send_guide_page(message, pages[0])
-        await message.reply_text(
-            f"Answer for: {question}\n\n{answer}\n\n"
-            f"{ICON_MESSAGE} Need human help? Contact {SUPPORT_1} or {SUPPORT_2}.",
-            reply_markup=notice_keyboard(),
-        )
+        await message.reply_text(answer)
     except Exception as exc:
         await _stop_background_task(locals().get("typing_task"))
         log.error("/ask failed (%s)", type(exc).__name__)
         await message.reply_text(
-            f"Need assistance with {question}- Contact our configured support contacts: {SUPPORT_1} or {SUPPORT_2}.",
-            reply_markup=support_keyboard(),
+            f"Need assistance with {question}. Contact the configured iPAY support "
+            f"team: {SUPPORT_1} or {SUPPORT_2}.",
         )
 
 
@@ -6235,15 +6672,17 @@ async def _gemini_answer(
         )
 
     async def collect_response() -> str:
-        stream = await gemini_client.aio.models.generate_content_stream(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_content,
-                max_output_tokens=AI_MAX_OUTPUT_TOKENS,
-                temperature=0.2,
-            ),
-        )
+        async def _start_stream():
+            return await gemini_client.aio.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_content,
+                    max_output_tokens=AI_MAX_OUTPUT_TOKENS,
+                    temperature=0.2,
+                ),
+            )
+        stream = await _call_gemini_with_retry("chat_stream", _start_stream)
         answer_parts: List[str] = []
         async for chunk in stream:
             content = getattr(chunk, "text", None)
@@ -6270,8 +6709,13 @@ async def _ai_answer(
         if pre_retrieved_pages is not None
         else guide.retrieve(question, top_k=2)
     )
+    knowledge_snippets = (
+        guide.retrieve_knowledge(question, top_k=2)
+        if hasattr(guide, "retrieve_knowledge")
+        else []
+    )
     custom_faqs = await asyncio.to_thread(_matching_custom_faqs, question)
-    if not pages and not custom_faqs:
+    if not pages and not knowledge_snippets and not custom_faqs:
         await asyncio.to_thread(record_unanswered_question, question)
     if gemini_client is None:
         if custom_faqs:
@@ -6285,12 +6729,18 @@ async def _ai_answer(
             pages,
         )
     evidence_pages = pages if pages else []
+    snippet_texts = [
+        f"Verified Knowledge:\n{k.text}"
+        for k in knowledge_snippets
+    ]
     if evidence_pages:
-        excerpts = "\n\n".join(
+        snippet_texts.extend(
             f"Guide excerpt {index + 1}"
             f"{f' (page {page.page_number})' if page.page_number else ''}:\n{page.text}"
             for index, page in enumerate(evidence_pages)
         )
+    if snippet_texts:
+        excerpts = "\n\n".join(snippet_texts)
     else:
         excerpts = "No specific guide excerpt was found for this question. Rely strictly on the official Category rules and approved FAQs above."
     faq_context = "\n\n".join(
@@ -6465,8 +6915,14 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     message_id = getattr(message, "message_id", None)
-
     text = message_text.strip()
+    if not _claim_ai_message(
+        chat.id,
+        message_id,
+        getattr(update, "update_id", None),
+        context,
+    ):
+        return
 
     if getattr(message, "text", None):
         greeting_text = re.sub(r"@\w+", "", text).strip()
@@ -6478,8 +6934,15 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _handle_boost_message(update, context, text):
         return
 
+    addressed_to_bot = (
+        _is_group_message_for_bot(message, getattr(context, "bot", None))
+        if is_group
+        else True
+    )
+    if is_group and not addressed_to_bot:
+        return
+
     # Handle explicit UID requests without claiming account verification.
-    # 2. UID keyword triggers in groups even without bot @mention
     uid_match = re.search(r"(?i)\buid\s*[:=\-#]?\s*([A-Za-z0-9_-]{4,20})\b", text)
     if uid_match:
         extracted_uid = uid_match.group(1).strip()
@@ -6499,38 +6962,12 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if replied_text:
             replied_context = f"[Context - Replying to: \"{replied_text[:500]}\"]\n"
 
-    # Let clear iPay questions reach the bot without a mention. Other group
-    # conversation remains ignored unless the user addresses or replies to us.
     guide: Guide = context.application.bot_data["guide"]
-    addressed_to_bot = (
-        _is_group_message_for_bot(message, getattr(context, "bot", None))
-        if is_group
-        else True
-    )
-    pre_retrieved_pages = None
-    if is_group and not addressed_to_bot:
-        retrieval_query = f"{replied_text} {text}".strip() if replied_text else text
-        pre_retrieved_pages = guide.retrieve(retrieval_query, top_k=2)
-        if not pre_retrieved_pages:
-            return
 
     if not AI_ENABLED or await _async_get_setting("ai_enabled", "on") == "off":
         return
     if is_group and await _async_get_setting(f"ai_group:{chat.id}", "on") == "off":
         return
-
-    message_key = (chat.id, getattr(message, "message_id", None))
-    if message_key[1] is not None:
-        processed = context.application.bot_data.setdefault("processed_ai_messages", {})
-        now = time.monotonic()
-        processed = {
-            key: timestamp for key, timestamp in processed.items()
-            if now - timestamp < 180
-        }
-        if message_key in processed:
-            return
-        processed[message_key] = now
-        context.application.bot_data["processed_ai_messages"] = processed
 
     # Keep these short menu prompts separate from ordinary support questions unless replying to a message.
     clean_text = re.sub(r"@\w+", "", text).strip().lower()
@@ -6549,12 +6986,11 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "kya ho tum", "aap kaun ho",
     } or bool(re.search(r"^(?:who\s+(?:are\s+you|r\s+u)|what\s+is\s+this\s+bot)\b", clean_norm)):
         intro_text = (
-            "👋 I am the official <b>iPAY Support Bot</b>!\n\n"
+            "I am the iPAY Support Assistant.\n\n"
             "I can help you understand our platform, learn how to place orders, "
-            "provide withdrawal guidance, explain platform guidelines, and connect you with human support.\n\n"
-            "Choose an option below to get started:"
+            "provide withdrawal guidance, explain platform guidelines, and connect you with human support."
         )
-        await message.reply_text(intro_text, reply_markup=main_keyboard(), parse_mode="HTML")
+        await message.reply_text(intro_text)
         return
 
     now = time.monotonic()
@@ -6609,7 +7045,6 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 conversation_id,
                 guide,
                 enabled_languages=await _async_enabled_languages(),
-                pre_retrieved_pages=pre_retrieved_pages,
                 gemini_client=gemini_client,
             )
         finally:
@@ -6621,13 +7056,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "are you there", "good morning", "good evening", "hi", "hello",
             "hey", "yes", "no", "cool", "fine"
         }
-        if is_casual:
-            answer_with_support = answer
-        else:
-            answer_with_support = (
-                answer
-                + f"\n\n{ICON_MESSAGE} Need a human? Contact {SUPPORT_1}, {SUPPORT_2}, or {SUPPORT_3}."
-            )
+        answer_with_support = answer
         user_wants_guide_image = bool(
             re.search(
                 r"\b(guide|manual|pdf|page|screenshot|photo|diagram|image)\b",
@@ -6663,14 +7092,8 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if is_casual:
             fallback = raw_fallback
         else:
-            fallback = (
-                raw_fallback
-                + f"\n\n{ICON_MESSAGE} Need a human? Contact {SUPPORT_1}, {SUPPORT_2}, or {SUPPORT_3}."
-            )
-        await message.reply_text(
-            fallback,
-            reply_markup=support_options_keyboard(),
-        )
+            fallback = raw_fallback
+        await message.reply_text(fallback)
         await _save_question_event(
             update,
             question,
