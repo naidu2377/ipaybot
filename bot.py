@@ -2150,6 +2150,7 @@ async def _send_home_message(message) -> None:
                 sent_message = await message.reply_photo(
                     photo=file_id,
                     caption=caption,
+                    reply_markup=main_keyboard(),
                     parse_mode="HTML",
                 )
             else:
@@ -2157,6 +2158,7 @@ async def _send_home_message(message) -> None:
                     sent_message = await message.reply_photo(
                         photo=InputFile(image),
                         caption=caption,
+                        reply_markup=main_keyboard(),
                         parse_mode="HTML",
                     )
             _remember_photo_file_id(WELCOME_IMAGE_PATH, sent_message)
@@ -2165,7 +2167,11 @@ async def _send_home_message(message) -> None:
             log.error("Could not send the home image (%s): %s", type(exc).__name__, exc)
     else:
         log.error("Home image is missing: %s", WELCOME_IMAGE_PATH)
-    await message.reply_text(caption, parse_mode="HTML")
+    await message.reply_text(
+        caption,
+        reply_markup=main_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5659,7 +5665,10 @@ async def troubleshoot_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def new_wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(_wallet_caption("new_wallets"))
+        await update.effective_message.reply_text(
+            _wallet_caption("new_wallets"),
+            reply_markup=wallets_keyboard(),
+        )
 
 
 async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5675,17 +5684,18 @@ async def issues_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     caption = ISSUES_PROMPT
     if not ISSUES_IMAGE_PATH.is_file():
         log.warning("Issues image is missing: %s", ISSUES_IMAGE_PATH.name)
-        await message.reply_text(caption)
+        await message.reply_text(caption, reply_markup=issues_keyboard())
         return
     try:
         with ISSUES_IMAGE_PATH.open("rb") as image:
             await message.reply_photo(
                 photo=InputFile(image),
                 caption=caption,
+                reply_markup=issues_keyboard(),
             )
     except (OSError, TelegramError) as exc:
         log.error("Could not send the issues image (%s)", type(exc).__name__)
-        await message.reply_text(caption)
+        await message.reply_text(caption, reply_markup=issues_keyboard())
 
 
 async def security_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5791,27 +5801,31 @@ async def _send_wallets(message) -> None:
         return
     caption = _wallet_caption("overview")
     image_path = WALLET_IMAGE_PATH
+    keyboard = wallets_keyboard()
     if image_path.is_file():
         try:
             with image_path.open("rb") as image:
                 await message.reply_photo(
                     photo=InputFile(image),
                     caption=caption,
+                    reply_markup=keyboard,
                 )
             return
         except (OSError, TelegramError) as exc:
             log.error("Could not send wallet menu image (%s): %s", type(exc).__name__, exc)
-    await message.reply_text(caption)
+    await message.reply_text(caption, reply_markup=keyboard)
 
 
 async def _send_security(message) -> None:
     if not message:
         return
+    keyboard = security_keyboard()
     if not SECURITY_IMAGE_PATH.is_file():
         log.error("Security image is missing: %s", SECURITY_IMAGE_PATH)
         await message.reply_text(
             "The security image is unavailable. Keep passwords, OTPs, and PINs "
             "private, and use /agent if you need human assistance.",
+            reply_markup=keyboard,
         )
         return
     try:
@@ -5819,21 +5833,24 @@ async def _send_security(message) -> None:
             await message.reply_photo(
                 photo=InputFile(image),
                 caption=SECURITY_ALERT_TEXT,
+                reply_markup=keyboard,
             )
     except (OSError, TelegramError) as exc:
         log.error("Could not send security image (%s): %s", type(exc).__name__, exc)
-        await message.reply_text(SECURITY_ALERT_TEXT)
+        await message.reply_text(SECURITY_ALERT_TEXT, reply_markup=keyboard)
 
 
 async def _send_support(message) -> None:
     if not message:
         return
+    keyboard = support_options_keyboard()
     if SUPPORT_IMAGE_PATH.is_file():
         try:
             with SUPPORT_IMAGE_PATH.open("rb") as image:
                 await message.reply_photo(
                     photo=InputFile(image),
                     caption="Use /agent for configured support contacts.",
+                    reply_markup=keyboard,
                 )
             return
         except (OSError, TelegramError) as exc:
@@ -5841,7 +5858,8 @@ async def _send_support(message) -> None:
     else:
         log.error("Support image is missing: %s", SUPPORT_IMAGE_PATH)
     await message.reply_text(
-        "Support image unavailable. Use /agent for configured support contacts."
+        "Support image unavailable. Use /agent for configured support contacts.",
+        reply_markup=keyboard,
     )
 
 
@@ -6030,6 +6048,7 @@ async def _replace_callback_image(
     update: Update,
     image_path: Path,
     caption: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
     parse_mode: Optional[str] = None,
 ) -> bool:
     query = update.callback_query
@@ -6042,6 +6061,7 @@ async def _replace_callback_image(
             return await _replace_callback_text(
                 update,
                 caption,
+                keyboard=keyboard,
                 parse_mode=parse_mode or "HTML",
             )
         return False
@@ -6056,6 +6076,8 @@ async def _replace_callback_image(
                 kwargs["caption"] = caption[:1024]
                 if parse_mode:
                     kwargs["parse_mode"] = parse_mode
+            if keyboard is not None:
+                kwargs["reply_markup"] = keyboard
             return kwargs
 
         try:
@@ -6113,6 +6135,7 @@ async def _replace_callback_image(
 async def _replace_callback_text(
     update: Update,
     text: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
     parse_mode: str = "HTML",
 ) -> bool:
     query = update.callback_query
@@ -6120,7 +6143,10 @@ async def _replace_callback_text(
     if not query or not message:
         return False
     try:
-        await message.reply_text(text, parse_mode=parse_mode)
+        kwargs: Dict[str, Any] = {"parse_mode": parse_mode}
+        if keyboard is not None:
+            kwargs["reply_markup"] = keyboard
+        await message.reply_text(text, **kwargs)
     except TelegramError as exc:
         log.error("Could not send replacement menu text (%s): %s", type(exc).__name__, exc)
         return False
@@ -6141,72 +6167,81 @@ async def _show_wallet_menu(update: Update, mode: str = "payin") -> None:
         return
 
     caption = _wallet_caption(mode)
+    keyboard = wallets_keyboard()
     image_path = WALLET_IMAGE_PATH
-    if not await _replace_callback_image(update, image_path, caption):
-        await _present_callback(update, caption)
+    if not await _replace_callback_image(update, image_path, caption, keyboard):
+        await _present_callback(update, caption, keyboard)
 
 
 async def _present_callback(
     update: Update,
     text: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
-    await _replace_callback_text(update, text)
+    await _replace_callback_text(update, text, keyboard)
 
 
 async def _show_home_menu(update: Update) -> None:
+    keyboard = main_keyboard()
     caption = f"{_format_welcome_caption()}\n\nAsk a question or use /help for commands."
     if not await _replace_callback_image(
         update,
         WELCOME_IMAGE_PATH,
         caption,
+        keyboard,
     ):
-        await _present_callback(update, caption)
+        await _present_callback(update, caption, keyboard)
 
 
 async def _show_support_menu(update: Update) -> None:
+    keyboard = support_options_keyboard()
     if not await _replace_callback_image(
         update,
         SUPPORT_IMAGE_PATH,
-        "Use /agent for configured support contacts.",
+        "",
+        keyboard,
     ):
         await _present_callback(
             update,
-            "Support image unavailable. Use /agent for configured support contacts.",
+            "Support image unavailable. Choose a support option below.",
+            keyboard,
         )
 
 
 async def _show_issues_menu(update: Update) -> None:
     caption = ISSUES_PROMPT
-    if not await _replace_callback_image(
-        update,
-        ISSUES_IMAGE_PATH,
-        caption,
-    ):
+    keyboard = issues_keyboard()
+    if not await _replace_callback_image(update, ISSUES_IMAGE_PATH, caption, keyboard):
         await _present_callback(
             update,
-            "The Issues image could not be sent. Ask about your issue or use "
-            "/payment, /withdrawal, or /commission.",
+            "The Issues image could not be sent. Choose an issue below.",
+            keyboard,
         )
 
 
 async def _show_security_menu(update: Update) -> None:
+    keyboard = security_keyboard()
     if not await _replace_callback_image(
         update,
         SECURITY_IMAGE_PATH,
         SECURITY_ALERT_TEXT,
+        keyboard,
     ):
-        await _present_callback(update, SECURITY_ALERT_TEXT)
+        await _present_callback(update, SECURITY_ALERT_TEXT, keyboard)
 
 
 async def _show_new_user_menu(update: Update) -> None:
+    keyboard = new_user_keyboard()
     if not await _replace_callback_image(
         update,
         WELCOME_IMAGE_PATH,
-        "Ask about getting started, placing an order, referrals, or account safety.",
+        "",
+        keyboard,
     ):
         await _replace_callback_text(
             update,
-            "Ask a question about getting started, placing an order, referrals, or account safety.",
+            "Choose a topic below:",
+            keyboard,
         )
 
 
@@ -6221,6 +6256,7 @@ async def _send_new_user_guide(update: Update) -> None:
                 document=pdf_file,
                 filename=GUIDE_PDF_PATH.name,
                 caption=f"{ICON_BOOK} iPay New User Guide",
+                reply_markup=new_user_keyboard(),
             )
     except OSError as exc:
         log.error(
@@ -6229,11 +6265,13 @@ async def _send_new_user_guide(update: Update) -> None:
         )
         await message.reply_text(
             "The iPay User Guide PDF is currently unavailable. Use /ask for guidance.",
+            reply_markup=new_user_keyboard(),
         )
     except TelegramError as exc:
         log.error("Could not send user guide PDF (%s): %s", type(exc).__name__, exc)
         await message.reply_text(
             "The iPay User Guide could not be sent. Please try again later.",
+            reply_markup=new_user_keyboard(),
         )
 
 
@@ -6249,13 +6287,15 @@ async def _send_how_ipay_works(update: Update) -> None:
         "🎯 Complete Orders • Earn Rewards!\n\n"
         "◆ START YOUR iPAY JOURNEY!"
     )
+    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
         update,
         HOW_IPAY_WORKS_IMAGE_PATH,
         caption,
+        keyboard,
         parse_mode="HTML",
     ):
-        await _replace_callback_text(update, caption)
+        await _replace_callback_text(update, caption, keyboard)
 
 
 async def _send_how_to_place_order(update: Update) -> None:
@@ -6274,13 +6314,15 @@ async def _send_how_to_place_order(update: Update) -> None:
         "🎯 FOLLOW • VERIFY • COMPLETE!\n\n"
         "◆ SIMPLE • SECURE • TRUSTED"
     )
+    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
         update,
         HOW_TO_PLACE_ORDER_IMAGE_PATH,
         caption,
+        keyboard,
         parse_mode="HTML",
     ):
-        await _replace_callback_text(update, caption)
+        await _replace_callback_text(update, caption, keyboard)
 
 
 async def _send_security_alerts(update: Update) -> None:
@@ -6297,10 +6339,11 @@ async def _send_security_alerts(update: Update) -> None:
         "▪️ Report any scam attempts immediately.\n\n"
         "◆ STAY ALERT • STAY SAFE!\n\n— iPAY TEAM"
     )
+    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, SUGGESTION_IMAGE_PATH, caption, parse_mode="HTML"
+        update, SUGGESTION_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption)
+        await _replace_callback_text(update, caption, keyboard)
 
 
 async def _send_smart_sales_settings(update: Update) -> None:
@@ -6317,10 +6360,11 @@ async def _send_smart_sales_settings(update: Update) -> None:
         "▪️ Keep your account settings updated.\n\n"
         "◆ MANAGE • CONTROL • STAY UPDATED!"
     )
+    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, GUIDELINES_IMAGE_PATH, caption, parse_mode="HTML"
+        update, GUIDELINES_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption)
+        await _replace_callback_text(update, caption, keyboard)
 
 
 async def _send_newuser_referral(update: Update) -> None:
@@ -6338,10 +6382,11 @@ async def _send_newuser_referral(update: Update) -> None:
         "▪️ Claim your referral rewards.\n\n"
         "◆ INVITE • COMPLETE • EARN!"
     )
+    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, REFERRAL_IMAGE_PATH, caption, parse_mode="HTML"
+        update, REFERRAL_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption)
+        await _replace_callback_text(update, caption, keyboard)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

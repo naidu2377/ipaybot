@@ -2433,7 +2433,11 @@ class BotTests(unittest.TestCase):
             "Describe your issue",
             message.reply_photo.await_args.kwargs["caption"],
         )
-        self.assertNotIn("reply_markup", message.reply_photo.await_args.kwargs)
+        markup = message.reply_photo.await_args.kwargs["reply_markup"]
+        self.assertIn(
+            "issue:deposit",
+            [button.callback_data for row in markup.inline_keyboard for button in row],
+        )
 
     def test_public_and_admin_commands_are_registered(self):
         application = bot.build_application(
@@ -2755,7 +2759,22 @@ class BotTests(unittest.TestCase):
         )
         self.assertNotIn("Hello @", text)
         self.assertNotIn("How was your day", text)
-        self.assertNotIn("reply_markup", message.reply_photo.await_args.kwargs)
+        menu_actions = [
+            button.callback_data
+            for row in message.reply_photo.await_args.kwargs[
+                "reply_markup"
+            ].inline_keyboard
+            for button in row
+        ]
+        self.assertTrue(
+            {
+                "menu:wallets",
+                "menu:issues",
+                "menu:security",
+                "menu:support",
+                "menu:new_user",
+            } <= set(menu_actions)
+        )
 
     def test_telegram_media_upload_timeout_is_extended(self):
         application = bot.build_application(
@@ -2798,6 +2817,7 @@ class BotTests(unittest.TestCase):
         sent_photo = message.reply_photo.await_args.kwargs
         self.assertEqual(sent_photo["photo"].filename, "welcome_new_user.jpg")
         self.assertIn("WELCOME TO iPAY", sent_photo["caption"])
+        self.assertIn("reply_markup", sent_photo)
 
     def test_main_menu_from_text_replaces_message_with_home_image(self):
         image_path = (
@@ -2862,11 +2882,14 @@ class BotTests(unittest.TestCase):
         query.delete_message.assert_awaited_once()
         sent_photo = message.reply_photo.await_args.kwargs
         self.assertEqual(sent_photo["photo"].filename, "support_home_compressed.jpg")
-        self.assertEqual(
-            sent_photo["caption"],
-            "Use /agent for configured support contacts.",
-        )
-        self.assertNotIn("reply_markup", sent_photo)
+        self.assertNotIn("caption", sent_photo)
+        actions = [
+            button.callback_data
+            for row in sent_photo["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("menu:customer_support", actions)
+        self.assertIn("nav:back", actions)
 
     def test_security_callback_displays_security_image_and_guidance(self):
         image_path = (
@@ -2903,7 +2926,14 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent_photo["photo"].filename, "security.jpg")
         self.assertEqual(sent_photo["caption"], bot.SECURITY_ALERT_TEXT)
         self.assertLessEqual(len(sent_photo["caption"]), 1024)
-        self.assertNotIn("reply_markup", sent_photo)
+        self.assertIn(
+            "menu:customer_support",
+            [
+                button.callback_data
+                for row in sent_photo["reply_markup"].inline_keyboard
+                for button in row
+            ],
+        )
 
     def test_support_and_security_callbacks_show_images_from_text_menus(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -2952,11 +2982,11 @@ class BotTests(unittest.TestCase):
                         bot.SECURITY_ALERT_TEXT,
                     )
                 else:
-                    self.assertEqual(
-                        message.reply_photo.await_args.kwargs["caption"],
-                        "Use /agent for configured support contacts.",
+                    self.assertNotIn(
+                        "caption",
+                        message.reply_photo.await_args.kwargs,
                     )
-                self.assertNotIn(
+                self.assertIn(
                     "reply_markup",
                     message.reply_photo.await_args.kwargs,
                 )
@@ -3070,9 +3100,15 @@ class BotTests(unittest.TestCase):
             message.reply_photo.await_args.kwargs["caption"],
             bot.SECURITY_ALERT_TEXT,
         )
-        self.assertNotIn(
-            "reply_markup",
-            message.reply_photo.await_args.kwargs,
+        self.assertIn(
+            "nav:menu",
+            [
+                button.callback_data
+                for row in message.reply_photo.await_args.kwargs[
+                    "reply_markup"
+                ].inline_keyboard
+                for button in row
+            ],
         )
 
     def test_support_command_sends_support_image_only(self):
@@ -3093,10 +3129,7 @@ class BotTests(unittest.TestCase):
             message.reply_photo.await_args.kwargs["caption"],
             "Use /agent for configured support contacts.",
         )
-        self.assertNotIn(
-            "reply_markup",
-            message.reply_photo.await_args.kwargs,
-        )
+        self.assertIn("reply_markup", message.reply_photo.await_args.kwargs)
         message.reply_text.assert_not_awaited()
         message.reply_text.assert_not_awaited()
 
@@ -3136,7 +3169,14 @@ class BotTests(unittest.TestCase):
             "Describe your issue",
             media_kwargs["caption"],
         )
-        self.assertNotIn("reply_markup", media_kwargs)
+        self.assertIn(
+            "issue:deposit",
+            [
+                button.callback_data
+                for row in media_kwargs["reply_markup"].inline_keyboard
+                for button in row
+            ],
+        )
 
     def test_issues_callback_falls_back_to_text_when_image_upload_fails(self):
         image_path = self.root / "issues.jpg"
@@ -3190,7 +3230,14 @@ class BotTests(unittest.TestCase):
             sent_photo["caption"],
             "For configured support contacts, use /agent.",
         )
-        self.assertNotIn("reply_markup", sent_photo)
+        self.assertIn(
+            "nav:back",
+            [
+                button.callback_data
+                for row in sent_photo["reply_markup"].inline_keyboard
+                for button in row
+            ],
+        )
         query.edit_message_media.assert_not_awaited()
 
     def test_customer_support_callback_displays_image_from_text_message(self):
@@ -3224,7 +3271,7 @@ class BotTests(unittest.TestCase):
             sent_photo["caption"],
             "For configured support contacts, use /agent.",
         )
-        self.assertNotIn("reply_markup", sent_photo)
+        self.assertIn("reply_markup", sent_photo)
 
     def test_pdf_text_retrieval_and_page_rendering(self):
         pdf_path = self.root / "guide.pdf"
@@ -4347,7 +4394,7 @@ class BotTests(unittest.TestCase):
             "Describe your issue",
             final_menu["caption"],
         )
-        self.assertNotIn("reply_markup", final_menu)
+        self.assertIn("reply_markup", final_menu)
         history_key = (message.chat.id, query.from_user.id)
         self.assertEqual(
             context.application.bot_data["menu_history"][history_key],
@@ -4613,7 +4660,14 @@ class BotTests(unittest.TestCase):
                 "⚠️ Business wallets are recommended for smoother collections."
             ),
         )
-        self.assertNotIn("reply_markup", sent_photo)
+        self.assertEqual(
+            [
+                button.callback_data
+                for row in sent_photo["reply_markup"].inline_keyboard
+                for button in row
+            ],
+            ["wallet:payin", "wallet:payout", "nav:back"],
+        )
 
     def test_wallet_command_uses_the_supported_wallet_image(self):
         message = SimpleNamespace(
@@ -4697,7 +4751,14 @@ class BotTests(unittest.TestCase):
                         "Business wallets are recommended for smoother collections.",
                         media["caption"],
                     )
-                self.assertNotIn("reply_markup", media)
+                self.assertIn(
+                    "nav:back",
+                    [
+                        button.callback_data
+                        for row in media["reply_markup"].inline_keyboard
+                        for button in row
+                    ],
+                )
 
     def test_boost_classifier_matches_curated_requests_and_ignores_chatter(self):
         examples = (
@@ -5185,15 +5246,22 @@ class BotTests(unittest.TestCase):
             update, msg = make_update("menu:new_user")
             asyncio.run(bot.handle_callback(update, context))
             msg.reply_photo.assert_awaited_once()
+            self.assertNotIn("caption", msg.reply_photo.await_args.kwargs)
             self.assertIn(
-                "Ask about getting started",
-                msg.reply_photo.await_args.kwargs["caption"],
+                "newuser:guide",
+                [
+                    button.callback_data
+                    for row in msg.reply_photo.await_args.kwargs[
+                        "reply_markup"
+                    ].inline_keyboard
+                    for button in row
+                ],
             )
-            self.assertNotIn("reply_markup", msg.reply_photo.await_args.kwargs)
 
             update, msg = make_update("newuser:guide")
             asyncio.run(bot.handle_callback(update, context))
             self.assertEqual(msg.reply_document.await_args.kwargs["filename"], "I_PAY_User_Guide.pdf")
+            self.assertIn("reply_markup", msg.reply_document.await_args.kwargs)
 
             for action, expected in (
                 ("newuser:how_works", "Register your iPAY account."),
@@ -5206,14 +5274,16 @@ class BotTests(unittest.TestCase):
                 asyncio.run(bot.handle_callback(update, context))
                 msg.reply_photo.assert_awaited_once()
                 self.assertIn(expected, msg.reply_photo.await_args.kwargs["caption"])
+                self.assertIn("reply_markup", msg.reply_photo.await_args.kwargs)
 
             update, msg = make_update("newuser:suggestion")
             asyncio.run(bot.handle_callback(update, context))
             msg.reply_photo.assert_awaited_once()
             self.assertIn("SMART SALES SETTINGS", msg.reply_photo.await_args.kwargs["caption"])
             self.assertEqual(msg.reply_photo.await_args.kwargs["parse_mode"], "HTML")
+            self.assertIn("reply_markup", msg.reply_photo.await_args.kwargs)
 
-    def test_new_user_menu_uses_a_short_fallback_without_its_removed_caption(self):
+    def test_new_user_menu_fallback_keeps_the_navigation_buttons(self):
         message = SimpleNamespace(
             reply_photo=AsyncMock(),
             reply_text=AsyncMock(),
@@ -5228,9 +5298,9 @@ class BotTests(unittest.TestCase):
             )
         self.assertEqual(
             message.reply_text.await_args.args[0],
-            "Ask about getting started, placing an order, referrals, or account safety.",
+            "Choose a topic below:",
         )
-        self.assertNotIn("reply_markup", message.reply_text.await_args.kwargs)
+        self.assertIn("reply_markup", message.reply_text.await_args.kwargs)
 
     def test_boost_caption_is_not_double_handled_by_ai_reply(self):
         message = SimpleNamespace(text=None, caption="boost 749488", reply_text=AsyncMock(), message_id=555, chat_id=100)
