@@ -2430,22 +2430,10 @@ class BotTests(unittest.TestCase):
             )
         message.reply_photo.assert_awaited_once()
         self.assertIn(
-            "Identify your issue and click the button below",
+            "Describe your issue",
             message.reply_photo.await_args.kwargs["caption"],
         )
-        buttons = message.reply_photo.await_args.kwargs["reply_markup"].inline_keyboard
-        self.assertNotIn(
-            "issue:account",
-            [button.callback_data for row in buttons for button in row],
-        )
-        self.assertNotIn(
-            "issue:other",
-            [button.callback_data for row in buttons for button in row],
-        )
-        self.assertIn(
-            "nav:back",
-            [button.callback_data for row in buttons for button in row],
-        )
+        self.assertNotIn("reply_markup", message.reply_photo.await_args.kwargs)
 
     def test_public_and_admin_commands_are_registered(self):
         application = bot.build_application(
@@ -2465,7 +2453,15 @@ class BotTests(unittest.TestCase):
         }
         self.assertEqual(
             commands,
-            {"start", "hi", *bot.BOOST_COMMANDS, "questions", "qsearch", "qstatus", "qnote", "qresolve", "qshow", "qhistory", "qassign", "dailyreport", "unanswered", "ask", "reset", "clear"},
+            {
+                "start", "help", "menu", "hi", "faq", "agent", "report", "urgent",
+                "wallets", "issues", "security", "support", "referral", "commission",
+                "rewards", "payment", "withdrawal", "relink", "walletstatus",
+                "troubleshoot", "newwallets", "quota", *bot.BOOST_COMMANDS,
+                "questions", "qsearch", "qstatus", "qnote", "qresolve", "qshow",
+                "qhistory", "qassign", "dailyreport", "unanswered", "ask",
+                "reset", "clear",
+            },
         )
         boost_handlers = [
             handler
@@ -2482,7 +2478,6 @@ class BotTests(unittest.TestCase):
         ]
         self.assertEqual(len(caption_handlers), 1)
         self.assertEqual(caption_handlers[0].callback, bot.boost_caption_handler)
-        self.assertEqual(len(application.handlers[0]), 17)
         screenshot_handlers = [
             handler
             for handler in application.handlers[-2]
@@ -2752,15 +2747,7 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("![", text)
         self.assertNotIn("<tg-emoji", text)
         self.assertTrue(text.startswith("WELCOME TO iPAY ⚡\n\n"))
-        self.assertEqual(
-            text,
-            "WELCOME TO iPAY ⚡\n\n"
-            "📈 Up to 4% commission on orders\n"
-            "🎯 Rewards on selected activities\n"
-            "💼 Easy access to withdrawal support\n"
-            "🪧 Scalable earning opportunities\n\n"
-            "🏛️ Choose iPAY, choose a smarter path forward.",
-        )
+        self.assertTrue(text.endswith("Ask a question or use /help for commands."))
         self.assertNotIn("Your guide to wallets, payments, and support:", text)
         self.assertIn(
             "🏛️ Choose iPAY, choose a smarter path forward.",
@@ -2768,9 +2755,7 @@ class BotTests(unittest.TestCase):
         )
         self.assertNotIn("Hello @", text)
         self.assertNotIn("How was your day", text)
-        self.assertIn("reply_markup", message.reply_photo.await_args.kwargs)
-        start_button = bot.main_keyboard().inline_keyboard[-1][0]
-        self.assertEqual(start_button.text, f"{bot.ICON_ARROW} START NOW")
+        self.assertNotIn("reply_markup", message.reply_photo.await_args.kwargs)
 
     def test_telegram_media_upload_timeout_is_extended(self):
         application = bot.build_application(
@@ -2877,16 +2862,11 @@ class BotTests(unittest.TestCase):
         query.delete_message.assert_awaited_once()
         sent_photo = message.reply_photo.await_args.kwargs
         self.assertEqual(sent_photo["photo"].filename, "support_home_compressed.jpg")
-        self.assertNotIn("caption", sent_photo)
-        markup = sent_photo["reply_markup"]
-        self.assertIn(
-            "menu:customer_support",
-            {
-                button.callback_data
-                for row in markup.inline_keyboard
-                for button in row
-            },
+        self.assertEqual(
+            sent_photo["caption"],
+            "Use /agent for configured support contacts.",
         )
+        self.assertNotIn("reply_markup", sent_photo)
 
     def test_security_callback_displays_security_image_and_guidance(self):
         image_path = (
@@ -2923,23 +2903,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent_photo["photo"].filename, "security.jpg")
         self.assertEqual(sent_photo["caption"], bot.SECURITY_ALERT_TEXT)
         self.assertLessEqual(len(sent_photo["caption"]), 1024)
-        markup = sent_photo["reply_markup"]
-        self.assertIn(
-            "menu:customer_support",
-            {
-                button.callback_data
-                for row in markup.inline_keyboard
-                for button in row
-            },
-        )
-        self.assertNotIn(
-            "Group Support",
-            [
-                button.text
-                for row in markup.inline_keyboard
-                for button in row
-            ],
-        )
+        self.assertNotIn("reply_markup", sent_photo)
 
     def test_support_and_security_callbacks_show_images_from_text_menus(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -2988,10 +2952,14 @@ class BotTests(unittest.TestCase):
                         bot.SECURITY_ALERT_TEXT,
                     )
                 else:
-                    self.assertNotIn(
-                        "caption",
-                        message.reply_photo.await_args.kwargs,
+                    self.assertEqual(
+                        message.reply_photo.await_args.kwargs["caption"],
+                        "Use /agent for configured support contacts.",
                     )
+                self.assertNotIn(
+                    "reply_markup",
+                    message.reply_photo.await_args.kwargs,
+                )
                 query.delete_message.assert_awaited_once()
                 message.reply_text.assert_not_awaited()
 
@@ -3102,14 +3070,9 @@ class BotTests(unittest.TestCase):
             message.reply_photo.await_args.kwargs["caption"],
             bot.SECURITY_ALERT_TEXT,
         )
-        keyboard = message.reply_photo.await_args.kwargs["reply_markup"]
         self.assertNotIn(
-            "Group Support",
-            [
-                button.text
-                for row in keyboard.inline_keyboard
-                for button in row
-            ],
+            "reply_markup",
+            message.reply_photo.await_args.kwargs,
         )
 
     def test_support_command_sends_support_image_only(self):
@@ -3126,7 +3089,14 @@ class BotTests(unittest.TestCase):
         ):
             asyncio.run(bot._send_support(message))
         message.reply_photo.assert_awaited_once()
-        self.assertNotIn("caption", message.reply_photo.await_args.kwargs)
+        self.assertEqual(
+            message.reply_photo.await_args.kwargs["caption"],
+            "Use /agent for configured support contacts.",
+        )
+        self.assertNotIn(
+            "reply_markup",
+            message.reply_photo.await_args.kwargs,
+        )
         message.reply_text.assert_not_awaited()
         message.reply_text.assert_not_awaited()
 
@@ -3163,18 +3133,10 @@ class BotTests(unittest.TestCase):
         media_kwargs = message.reply_photo.await_args.kwargs
         self.assertEqual(media_kwargs["photo"].filename, "customer_service.png")
         self.assertIn(
-            "Identify your issue and click the button below",
+            "Describe your issue",
             media_kwargs["caption"],
         )
-        markup = media_kwargs["reply_markup"]
-        self.assertIn(
-            "issue:withdrawal",
-            {
-                button.callback_data
-                for row in markup.inline_keyboard
-                for button in row
-            },
-        )
+        self.assertNotIn("reply_markup", media_kwargs)
 
     def test_issues_callback_falls_back_to_text_when_image_upload_fails(self):
         image_path = self.root / "issues.jpg"
@@ -3226,9 +3188,9 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent_photo["photo"].filename, "customer_service.png")
         self.assertEqual(
             sent_photo["caption"],
-            "Choose a customer support contact:",
+            "For configured support contacts, use /agent.",
         )
-        self.assertIn("reply_markup", sent_photo)
+        self.assertNotIn("reply_markup", sent_photo)
         query.edit_message_media.assert_not_awaited()
 
     def test_customer_support_callback_displays_image_from_text_message(self):
@@ -3260,26 +3222,9 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent_photo["photo"].filename, "customer_service.png")
         self.assertEqual(
             sent_photo["caption"],
-            "Choose a customer support contact:",
+            "For configured support contacts, use /agent.",
         )
-        keyboard = sent_photo["reply_markup"]
-        customer_buttons = [
-            button
-            for row in keyboard.inline_keyboard
-            for button in row
-            if button.url
-        ]
-        self.assertEqual(
-            [button.url for button in customer_buttons],
-            [
-                "https://t.me/Ipay800",
-                "https://t.me/Roas668",
-                "https://t.me/Ipay811",
-                "https://t.me/Ipay_Official_Channel",
-                bot.GROUP_SUPPORT_URL,
-                bot.OFFICIAL_GROUP_URL,
-            ],
-        )
+        self.assertNotIn("reply_markup", sent_photo)
 
     def test_pdf_text_retrieval_and_page_rendering(self):
         pdf_path = self.root / "guide.pdf"
@@ -3502,10 +3447,29 @@ class BotTests(unittest.TestCase):
         self.assertEqual(
             generate.await_args.kwargs["model"], "test-gemini-model"
         )
+        self.assertEqual(
+            generate.await_args.kwargs["config"].max_output_tokens,
+            bot.AI_MAX_OUTPUT_TOKENS,
+        )
         instructions = generate.await_args.kwargs["config"].system_instruction
         self.assertIn("recipient", instructions)
         self.assertIn("same language", instructions)
         self.assertIn("untrusted input", instructions)
+
+    def test_chat_stream_does_not_add_application_level_retries(self):
+        async def response_stream():
+            yield SimpleNamespace(text="A short verified answer.")
+
+        stream_call = AsyncMock(return_value=response_stream())
+        client = SimpleNamespace()
+        with patch.object(bot, "_call_gemini_with_retry", new=stream_call):
+            answer = asyncio.run(
+                bot._gemini_answer(client, "system", [], "question")
+            )
+
+        self.assertEqual(answer, "A short verified answer.")
+        stream_call.assert_awaited_once()
+        self.assertEqual(stream_call.await_args.kwargs["max_retries"], 0)
 
     def test_gemini_timeout_is_reported_without_provider_fallback(self):
         async def slow_gemini_request(**_kwargs):
@@ -3520,7 +3484,7 @@ class BotTests(unittest.TestCase):
         )
         with (
             patch.object(bot, "DB_PATH", self.root / "gemini-timeout.sqlite3"),
-            patch.object(bot, "AI_TIMEOUT_SECONDS", 0.01),
+            patch.object(bot, "AI_CHAT_TIMEOUT_SECONDS", 0.01),
             self.assertLogs("ipay-bot", level="ERROR") as logs,
         ):
             with self.assertRaises(TimeoutError):
@@ -3652,7 +3616,7 @@ class BotTests(unittest.TestCase):
     def test_group_filter_skips_unrelated_unaddressed_conversation(self):
         self.assertFalse(self.make_guide().retrieve("what time is dinner", top_k=1))
 
-    def test_missing_ai_key_keeps_guide_menus_available(self):
+    def test_missing_ai_key_returns_short_fallback_and_keeps_guide_retrieval(self):
         answer, pages = asyncio.run(
             bot._ai_answer(
                 "Which wallets are supported?",
@@ -3661,7 +3625,7 @@ class BotTests(unittest.TestCase):
                 None,
             )
         )
-        self.assertIn("not configured", answer)
+        self.assertEqual(answer, bot.AI_UNAVAILABLE_MESSAGE)
         self.assertTrue(pages)
 
     def test_sensitive_inputs_are_not_forwarded(self):
@@ -3689,7 +3653,7 @@ class BotTests(unittest.TestCase):
                     None,
                 )
             )
-        self.assertIn("AI answers are not configured", answer)
+        self.assertEqual(answer, bot.AI_UNAVAILABLE_MESSAGE)
         self.assertNotIn("Do not submit a duplicate withdrawal", answer)
 
     def test_ask_command_saves_private_follow_up_context(self):
@@ -3775,7 +3739,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("*_[unexpected]_—", sent_text)
         self.assertNotIn("parse_mode", message.reply_text.await_args.kwargs)
 
-    def test_sensitive_message_does_not_reach_ai_or_history(self):
+    def test_sensitive_message_without_ipay_question_is_ignored(self):
         message = SimpleNamespace(
             text="My OTP is 123456",
             reply_text=AsyncMock(),
@@ -3799,7 +3763,7 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(update, context))
         ai_answer.assert_not_awaited()
         add_message.assert_not_called()
-        self.assertIn("do not send", message.reply_text.await_args.args[0])
+        message.reply_text.assert_not_awaited()
 
     def test_group_messages_only_trigger_when_mentioning_or_replying_to_bot(self):
         bot_user = SimpleNamespace(id=777, username="ipaybot")
@@ -3837,9 +3801,36 @@ class BotTests(unittest.TestCase):
             )
         )
 
+    def test_ai_reply_requires_an_ipay_mention_and_a_question(self):
+        self.assertTrue(bot._is_ipay_question("iPAY, how do I check my balance"))
+        self.assertTrue(bot._is_ipay_question("@ipaybot where can I get support"))
+        self.assertFalse(bot._is_ipay_question("How do I check my balance?"))
+        self.assertFalse(bot._is_ipay_question("iPAY support"))
+        self.assertFalse(bot._is_ipay_question("my ipayment is working?"))
+
+        for text in ("How do I check my balance?", "iPAY support"):
+            with self.subTest(text=text):
+                message = SimpleNamespace(
+                    text=text,
+                    message_id=490,
+                    reply_text=AsyncMock(),
+                )
+                update = SimpleNamespace(
+                    effective_message=message,
+                    effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE, id=490),
+                )
+                context = SimpleNamespace(
+                    application=SimpleNamespace(bot_data={})
+                )
+                with patch.object(bot, "_ai_answer", new=AsyncMock()) as ai_answer:
+                    asyncio.run(bot.ai_reply(update, context))
+
+                ai_answer.assert_not_awaited()
+                message.reply_text.assert_not_awaited()
+
     def test_mentioned_group_question_gets_an_isolated_reply(self):
         message = SimpleNamespace(
-            text="@ipaybot My deposit is delayed",
+            text="@ipaybot where is my deposit?",
             entities=[
                 SimpleNamespace(type="mention", extract=lambda text: "@ipaybot")
             ],
@@ -3881,7 +3872,7 @@ class BotTests(unittest.TestCase):
 
     def test_group_reply_to_bot_message_gets_a_response(self):
         message = SimpleNamespace(
-            text="I tried that, what next?",
+            text="iPAY, I tried that, what next?",
             message_id=504,
             reply_to_message=SimpleNamespace(
                 text="Relink your wallet in the iPAY app.",
@@ -3916,14 +3907,14 @@ class BotTests(unittest.TestCase):
             ai_answer.await_args.args[0],
         )
         self.assertIn(
-            "I tried that, what next?",
+            "iPAY, I tried that, what next?",
             ai_answer.await_args.args[0],
         )
         message.reply_text.assert_awaited_once()
 
     def test_duplicate_ai_update_is_processed_once_concurrently(self):
         message = SimpleNamespace(
-            text="How do I check a pending payment?",
+            text="How do I check a pending iPAY payment?",
             message_id=505,
             reply_text=AsyncMock(),
         )
@@ -3990,7 +3981,7 @@ class BotTests(unittest.TestCase):
                 guide.retrieve.assert_not_called()
                 message.reply_text.assert_not_awaited()
 
-    def test_automatic_greetings_reply_in_private_group_and_supergroup(self):
+    def test_automatic_greetings_are_ignored_without_an_ipay_question(self):
         greeting_messages = (
             "hi",
             "hii",
@@ -4035,7 +4026,7 @@ class BotTests(unittest.TestCase):
 
                 asyncio.run(bot.ai_reply(update, context))
 
-                message.reply_text.assert_awaited_once_with(bot.HI_RESPONSE)
+                message.reply_text.assert_not_awaited()
 
     def test_automatic_greeting_deduplicates_with_hi_command(self):
         message = SimpleNamespace(text="hi", message_id=650, reply_text=AsyncMock())
@@ -4054,8 +4045,8 @@ class BotTests(unittest.TestCase):
 
     def test_greeting_words_inside_sentences_use_normal_support_handler(self):
         messages = (
-            "Hi, I need help with withdrawal",
-            "How can I say hello to someone?",
+            "iPAY, I need help with withdrawal?",
+            "How can I say hello to someone in iPAY?",
         )
         for index, text in enumerate(messages):
             with self.subTest(text=text):
@@ -4100,7 +4091,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn(answer, message.reply_text.await_args.args[0])
                 self.assertNotEqual(message.reply_text.await_args.args[0], bot.HI_RESPONSE)
 
-    def test_group_greeting_to_bot_only_sends_greeting_response(self):
+    def test_group_greeting_to_bot_is_ignored_without_a_question(self):
         message = SimpleNamespace(
             text="@ipaybot hi",
             entities=[
@@ -4124,7 +4115,7 @@ class BotTests(unittest.TestCase):
         with patch.object(bot, "_send_home_message", new=AsyncMock()) as home_message:
             asyncio.run(bot.ai_reply(update, context))
 
-        message.reply_text.assert_awaited_once_with(bot.HI_RESPONSE)
+        message.reply_text.assert_not_awaited()
         message.reply_photo.assert_not_awaited()
         home_message.assert_not_awaited()
 
@@ -4353,9 +4344,10 @@ class BotTests(unittest.TestCase):
         final_menu = message.reply_photo.await_args.kwargs
         self.assertEqual(final_menu["photo"].filename, "customer_service.png")
         self.assertIn(
-            "Identify your issue and click the button below",
+            "Describe your issue",
             final_menu["caption"],
         )
+        self.assertNotIn("reply_markup", final_menu)
         history_key = (message.chat.id, query.from_user.id)
         self.assertEqual(
             context.application.bot_data["menu_history"][history_key],
@@ -4621,15 +4613,7 @@ class BotTests(unittest.TestCase):
                 "⚠️ Business wallets are recommended for smoother collections."
             ),
         )
-        markup = sent_photo["reply_markup"]
-        self.assertEqual(
-            [button.callback_data for row in markup.inline_keyboard for button in row],
-            [
-                "wallet:payin",
-                "wallet:payout",
-                "nav:back",
-            ],
-        )
+        self.assertNotIn("reply_markup", sent_photo)
 
     def test_wallet_command_uses_the_supported_wallet_image(self):
         message = SimpleNamespace(
@@ -4713,15 +4697,7 @@ class BotTests(unittest.TestCase):
                         "Business wallets are recommended for smoother collections.",
                         media["caption"],
                     )
-                markup = media["reply_markup"]
-                self.assertEqual(
-                    [button.callback_data for row in markup.inline_keyboard for button in row],
-                    [
-                        "wallet:payin",
-                        "wallet:payout",
-                        "nav:back",
-                    ],
-                )
+                self.assertNotIn("reply_markup", media)
 
     def test_boost_classifier_matches_curated_requests_and_ignores_chatter(self):
         examples = (
@@ -4829,7 +4805,8 @@ class BotTests(unittest.TestCase):
         async def scenario():
             db_path = self.root / "automatic-boost.sqlite3"
             message = SimpleNamespace(
-                text="ID-642273\nBoost sale Boss\n@Ipay811\n@Ipay800",
+                text="@ipaybot iPAY, can I request this boost?\n"
+                "ID-642273\nBoost sale Boss\n@Ipay811\n@Ipay800",
                 message_id=501,
                 chat_id=-100123,
                 reply_text=AsyncMock(),
@@ -4842,6 +4819,7 @@ class BotTests(unittest.TestCase):
                 effective_user=user,
             )
             context = SimpleNamespace(
+                bot=SimpleNamespace(username="ipaybot"),
                 application=SimpleNamespace(bot_data={"guide": MagicMock()}),
                 args=[],
             )
@@ -4867,7 +4845,7 @@ class BotTests(unittest.TestCase):
             save_uid.assert_not_called()
 
             status_message = SimpleNamespace(
-                text="boost applied",
+                text="@ipaybot iPAY, was the boost applied?",
                 message_id=502,
                 chat_id=-100123,
                 reply_text=AsyncMock(),
@@ -4895,7 +4873,7 @@ class BotTests(unittest.TestCase):
             user = SimpleNamespace(id=901, username="member", first_name="Member")
             messages = [
                 SimpleNamespace(
-                    text=f"Need boost UID 64227{index}",
+                    text=f"@ipaybot iPAY, can I get boost UID 64227{index}?",
                     message_id=600 + index,
                     chat_id=900,
                     reply_text=AsyncMock(),
@@ -4903,6 +4881,7 @@ class BotTests(unittest.TestCase):
                 for index in (3, 4)
             ]
             context = SimpleNamespace(
+                bot=SimpleNamespace(username="ipaybot"),
                 application=SimpleNamespace(bot_data={"guide": MagicMock()}),
                 args=[],
             )
@@ -5118,7 +5097,11 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(set(captions)), 7)
 
     def test_ai_reply_triggers_boost_on_typos(self):
-        message = SimpleNamespace(text="bost 789983", reply_text=AsyncMock(), message_id=123)
+        message = SimpleNamespace(
+            text="iPAY, can you help with bost 789983?",
+            reply_text=AsyncMock(),
+            message_id=123,
+        )
         chat = SimpleNamespace(id=100, type="private")
         user = SimpleNamespace(id=444, username="trader", first_name="Trader")
         update = SimpleNamespace(effective_message=message, effective_chat=chat, effective_user=user)
@@ -5139,7 +5122,11 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("Contact support:", response)
 
     def test_ai_reply_prompts_for_uid_instead_of_using_general_ai_for_boost(self):
-        message = SimpleNamespace(text="please boost my withdrawal", reply_text=AsyncMock(), message_id=124)
+        message = SimpleNamespace(
+            text="iPAY, please boost my withdrawal?",
+            reply_text=AsyncMock(),
+            message_id=124,
+        )
         chat = SimpleNamespace(id=100, type="private")
         user = SimpleNamespace(id=445, username="trader", first_name="Trader")
         update = SimpleNamespace(effective_message=message, effective_chat=chat, effective_user=user)
@@ -5198,10 +5185,11 @@ class BotTests(unittest.TestCase):
             update, msg = make_update("menu:new_user")
             asyncio.run(bot.handle_callback(update, context))
             msg.reply_photo.assert_awaited_once()
-            self.assertNotIn("caption", msg.reply_photo.await_args.kwargs)
-            self.assertTrue(
-                all(len(row) == 1 for row in bot.new_user_keyboard().inline_keyboard)
+            self.assertIn(
+                "Ask about getting started",
+                msg.reply_photo.await_args.kwargs["caption"],
             )
+            self.assertNotIn("reply_markup", msg.reply_photo.await_args.kwargs)
 
             update, msg = make_update("newuser:guide")
             asyncio.run(bot.handle_callback(update, context))
@@ -5240,8 +5228,9 @@ class BotTests(unittest.TestCase):
             )
         self.assertEqual(
             message.reply_text.await_args.args[0],
-            "Choose a topic below:",
+            "Ask about getting started, placing an order, referrals, or account safety.",
         )
+        self.assertNotIn("reply_markup", message.reply_text.await_args.kwargs)
 
     def test_boost_caption_is_not_double_handled_by_ai_reply(self):
         message = SimpleNamespace(text=None, caption="boost 749488", reply_text=AsyncMock(), message_id=555, chat_id=100)
@@ -5697,7 +5686,7 @@ class BotTests(unittest.TestCase):
         from google.genai.errors import APIError
         guide = self.make_guide()
         message = SimpleNamespace(
-            text="how do I fix a withdrawal problem?",
+            text="iPAY, how do I fix a withdrawal problem?",
             caption=None,
             photo=[],
             document=None,
@@ -5721,13 +5710,70 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(update, context))
         kwargs = message.reply_text.await_args.kwargs
         self.assertNotIn("reply_markup", kwargs)
+        self.assertEqual(
+            message.reply_text.await_args.args[0],
+            bot.AI_UNAVAILABLE_MESSAGE,
+        )
+
+    def test_ask_api_failure_returns_short_plain_text(self):
+        message = SimpleNamespace(
+            reply_to_message=None,
+            reply_text=AsyncMock(),
+            message_id=7720,
+        )
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=993),
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE, id=993),
+        )
+        context = SimpleNamespace(
+            args=["my", "payment", "failed"],
+            application=SimpleNamespace(
+                bot_data={
+                    "guide": self.make_guide(),
+                    "gemini_client": SimpleNamespace(),
+                    "last_message_at": {},
+                }
+            ),
+        )
+        with (
+            patch.object(bot, "DB_PATH", self.root / "ask-api-failure.sqlite3"),
+            patch.object(bot, "_ai_answer", side_effect=TimeoutError),
+        ):
+            asyncio.run(bot.ask_command(update, context))
+
+        message.reply_text.assert_awaited_once_with(bot.AI_UNAVAILABLE_MESSAGE)
+
+    def test_plain_text_help_without_ipay_question_is_ignored(self):
+        message = SimpleNamespace(
+            text="help",
+            caption=None,
+            photo=[],
+            document=None,
+            reply_text=AsyncMock(),
+            message_id=7721,
+        )
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=994),
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE, id=994),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={"guide": self.make_guide(), "processed_ai_messages": {}}
+            ),
+            bot=SimpleNamespace(username="ipaybot"),
+        )
+        asyncio.run(bot.ai_reply(update, context))
+
+        message.reply_text.assert_not_awaited()
 
     def test_ai_support_api_failure_fallback_for_referral_query(self):
         """When Gemini API fails on a referral query, ai_reply catches error and returns helpful fallback."""
         from google.genai.errors import APIError
         guide = self.make_guide()
         message = SimpleNamespace(
-            text="how to invite friend and get referral bonus?",
+            text="iPAY, how to invite friend and get referral bonus?",
             caption=None,
             photo=[],
             document=None,
@@ -5754,12 +5800,7 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(update, context))
         message.reply_text.assert_awaited_once()
         sent_text = message.reply_text.await_args.args[0]
-        self.assertIn("referral guide", sent_text.lower())
-        self.assertIn("Team section", sent_text)
-        self.assertIn("15 orders", sent_text)
-        self.assertIn("₹100", sent_text)
-        self.assertIn("₹50", sent_text)
-        self.assertIn("Assets → Bonus → Referral Banner → View Detail", sent_text)
+        self.assertEqual(sent_text, bot.AI_UNAVAILABLE_MESSAGE)
 
     def test_ai_support_api_failure_fallback_for_general_support(self):
         """When Gemini API fails on a general support query, ai_reply catches error and returns general support fallback."""
@@ -5793,10 +5834,7 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(update, context))
         message.reply_text.assert_awaited_once()
         sent_text = message.reply_text.await_args.args[0]
-        self.assertIn("general support", sent_text.lower())
-        self.assertIn("24/7", sent_text)
-        self.assertIn("1,040", sent_text)
-        self.assertIn("UID", sent_text)
+        self.assertEqual(sent_text, bot.AI_UNAVAILABLE_MESSAGE)
 
     def test_multilingual_terms_in_guide_retrieve(self):
         """Guide retrieval correctly expands and matches Telugu, Hindi, Tamil, Kannada, and Malayalam terms."""
@@ -6032,13 +6070,13 @@ class BotTests(unittest.TestCase):
         instructions = generate.await_args.kwargs["config"].system_instruction
         self.assertIn("Order lock ayindi ela solve cheyali?", instructions)
 
-    def test_category4_and_5_api_failure_fallbacks(self):
-        """When Gemini API fails, payment and withdrawal queries receive proper Category 4 & 5 offline guidance."""
+    def test_category4_and_5_api_failure_fallbacks_are_short_and_honest(self):
+        """A Gemini outage does not trigger generic or unsupported payment guidance."""
         from google.genai.errors import APIError
         guide = self.make_guide()
         # Payment failure query
         msg_pay = SimpleNamespace(
-            text="money deducted but not credited in ipay",
+            text="iPAY, money deducted but not credited?",
             caption=None,
             photo=[],
             document=None,
@@ -6062,13 +6100,11 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(upd_pay, ctx))
         msg_pay.reply_text.assert_awaited_once()
         pay_text = msg_pay.reply_text.await_args.args[0]
-        self.assertIn("payment issues guide", pay_text.lower())
-        self.assertIn("Bills section", pay_text)
-        self.assertIn("Deducted but not credited", pay_text)
+        self.assertEqual(pay_text, bot.AI_UNAVAILABLE_MESSAGE)
 
         # Withdrawal failure query
         msg_wth = SimpleNamespace(
-            text="what is the minimum withdraw amount?",
+            text="iPAY, what is the minimum withdraw amount?",
             caption=None,
             photo=[],
             document=None,
@@ -6087,9 +6123,7 @@ class BotTests(unittest.TestCase):
             asyncio.run(bot.ai_reply(upd_wth, ctx))
         msg_wth.reply_text.assert_awaited_once()
         wth_text = msg_wth.reply_text.await_args.args[0]
-        self.assertIn("withdrawal guidelines", wth_text.lower())
-        self.assertIn("₹100", wth_text)
-        self.assertIn("relink your wallet", wth_text.lower())
+        self.assertEqual(wth_text, bot.AI_UNAVAILABLE_MESSAGE)
 
     def test_is_group_message_for_bot_advanced_detection(self):
         """Tests that _is_group_message_for_bot recognizes drag-replies and various ipaybot mentions."""
@@ -6148,7 +6182,7 @@ class BotTests(unittest.TestCase):
             from_user=SimpleNamespace(id=777, is_bot=True),
         )
         message = SimpleNamespace(
-            text="Why is this locked and how to fix?",
+            text="iPAY, why is this locked and how to fix?",
             message_id=9001,
             reply_to_message=replied_msg,
             reply_text=AsyncMock(),
@@ -6182,7 +6216,7 @@ class BotTests(unittest.TestCase):
         forwarded_question = ai_answer.await_args.args[0]
         self.assertIn("[Context - Replying to:", forwarded_question)
         self.assertIn("Withdrawal locked", forwarded_question)
-        self.assertIn("Why is this locked and how to fix?", forwarded_question)
+        self.assertIn("iPAY, why is this locked and how to fix?", forwarded_question)
 
     def test_ask_command_incorporates_dragged_message_context(self):
         """When /ask is used while replying to a message, the dragged message context is forwarded."""
@@ -6229,14 +6263,13 @@ class BotTests(unittest.TestCase):
         self.assertIn("Referral reward requires 15 orders", forwarded_question)
         self.assertIn("how many orders are needed?", forwarded_question)
 
-    def test_system_rules_contains_advanced_question_checking_and_complete_answers(self):
-        """Verify that SYSTEM_RULES contains comprehensive question checking and full answers rules."""
-        self.assertIn("ADVANCED QUESTION CHECKING & THOROUGH COMPLETE ANSWERS", bot.SYSTEM_RULES)
-        self.assertIn("COMPREHENSIVE QUESTION CHECKING", bot.SYSTEM_RULES)
-        self.assertIn("Quoted / Dragged Context", bot.SYSTEM_RULES)
-        self.assertIn("Multi-Part Queries", bot.SYSTEM_RULES)
-        self.assertIn("PROVIDING FULL, COMPLETE, AND ACTIONABLE ANSWERS", bot.SYSTEM_RULES)
-        self.assertGreaterEqual(bot.AI_MAX_OUTPUT_TOKENS, 500)
+    def test_system_rules_prioritize_concise_contextual_answers(self):
+        """Short replies override the previous conflicting complete-answer directive."""
+        self.assertIn("QUESTION UNDERSTANDING AND CONCISE ANSWERS", bot.SYSTEM_RULES)
+        self.assertIn("1–3 short sentences", bot.SYSTEM_RULES)
+        self.assertIn("only the verified details needed", bot.SYSTEM_RULES)
+        self.assertNotIn("Never provide half-answers", bot.SYSTEM_RULES)
+        self.assertNotIn("PROVIDING FULL, COMPLETE, AND ACTIONABLE ANSWERS", bot.SYSTEM_RULES)
 
     def test_category_6_and_7_in_system_rules_and_knowledge(self):
         """Verify Category 6 (Technical Errors) and Category 7 (Wallet Issues) are configured in SYSTEM_RULES."""

@@ -7,7 +7,8 @@ The bot does not perform, accelerate, or verify withdrawals. Boost replies are a
 ## Setup
 
 1. Copy `.env.example` to `.env`. Configure `TELEGRAM_BOT_TOKEN`, Supabase credentials, and `ADMIN_USER_IDS` (comma-separated Telegram numeric IDs).
-2. To enable Gemini chat replies and screenshot Vision confirmation, set `GEMINI_API_KEY` and `AI_ENABLED=true`. `GEMINI_MODEL` defaults to `gemini-3.8-flash`; `AI_MAX_OUTPUT_TOKENS` defaults to `300` and `AI_TIMEOUT_SECONDS` to `45`. Keep the key in the ignored local `.env` or Render's Environment settings; never add it to source files or Git. The startup log confirms SDK client construction without printing the key; Gemini API access is confirmed on the first request.
+2. To enable Gemini chat replies and screenshot Vision confirmation, set `GEMINI_API_KEY` and `AI_ENABLED=true`. `GEMINI_MODEL` defaults to `gemini-3.8-flash`; chat replies default to `200` output tokens and a `20`-second chat timeout. Chat requests do not add application-level retries; screenshot Vision keeps its existing client, retry, and timeout settings. Keep the key in the ignored local `.env` or Render's Environment settings; never add it to source files or Git. The startup log confirms SDK client construction without printing the key; Gemini API access is confirmed on the first request.
+   Ordinary chat replies are sent only for questions that mention iPAY; in groups, the message must also address the bot. Other messages, including greetings, are ignored. Explicit commands and screenshot handling are unchanged.
 3. In Supabase SQL Editor, run the complete [`supabase/schema.sql`](supabase/schema.sql). It includes the existing tables plus the additive question-intelligence objects. The same additive objects are available in [`supabase/migrations/20261111_question_intelligence.sql`](supabase/migrations/20261111_question_intelligence.sql).
 4. Install dependencies and run the bot:
 
@@ -284,8 +285,9 @@ Replies are streamed back to Telegram. Each reply appends the configured human e
 | `GEMINI_API_KEY` | _(required)_ | Google Gemini API key |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Gemini model to use |
 | `AI_ENABLED` | `true` | Set `false` to disable AI chat replies (screenshot Vision is unaffected) |
-| `AI_MAX_OUTPUT_TOKENS` | `300` | Maximum tokens per reply |
-| `AI_TIMEOUT_SECONDS` | `45` | Per-request Gemini timeout in seconds |
+| `AI_MAX_OUTPUT_TOKENS` | `200` | Maximum tokens per chat reply |
+| `AI_CHAT_TIMEOUT_SECONDS` | `20` | Maximum wait for a Gemini chat reply |
+| `AI_TIMEOUT_SECONDS` | `45` | Gemini HTTP client timeout in seconds |
 | `SCREENSHOT_GEMINI_CONFIDENCE_THRESHOLD` | `0.90` | Vision confidence threshold for screenshot classification |
 
 ### How to disable AI replies

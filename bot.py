@@ -107,8 +107,12 @@ SCREENSHOT_GEMINI_CONFIDENCE_THRESHOLD = min(
 AI_ENABLED = os.getenv("AI_ENABLED", "true").strip().casefold() not in {
     "0", "false", "no", "off",
 }
-AI_MAX_OUTPUT_TOKENS = max(1, int(os.getenv("AI_MAX_OUTPUT_TOKENS", "700")))
+AI_MAX_OUTPUT_TOKENS = max(1, int(os.getenv("AI_MAX_OUTPUT_TOKENS", "200")))
 AI_TIMEOUT_SECONDS = max(1.0, float(os.getenv("AI_TIMEOUT_SECONDS", "15")))
+AI_CHAT_TIMEOUT_SECONDS = max(
+    1.0, float(os.getenv("AI_CHAT_TIMEOUT_SECONDS", "20"))
+)
+AI_UNAVAILABLE_MESSAGE = "I can't answer right now. Please try again later."
 SCREENSHOT_VISION_TIMEOUT_SECONDS = max(
     1.0, float(os.getenv("SCREENSHOT_VISION_TIMEOUT_SECONDS", "15"))
 )
@@ -124,10 +128,12 @@ async def _call_gemini_with_retry(
     operation_name: str,
     coro_fn: Callable[..., Any],
     *args: Any,
+    max_retries: Optional[int] = None,
     **kwargs: Any,
 ) -> Any:
     """Execute a Gemini API operation with pacing, bounded exponential backoff, and retry on 429/503."""
     global _LAST_GEMINI_CALL_TIME
+    retry_limit = GEMINI_MAX_RETRIES if max_retries is None else max(0, max_retries)
     retries = 0
     while True:
         async with _GEMINI_CALL_LOCK:
@@ -149,7 +155,7 @@ async def _call_gemini_with_retry(
                 or "high demand" in err_msg
                 or "quota" in err_msg
             )
-            if is_transient and retries < GEMINI_MAX_RETRIES:
+            if is_transient and retries < retry_limit:
                 retries += 1
                 backoff_delay = min(10.0, (2.0 ** retries) + 1.0)
                 log.warning(
@@ -159,7 +165,7 @@ async def _call_gemini_with_retry(
                     code,
                     backoff_delay,
                     retries,
-                    GEMINI_MAX_RETRIES,
+                    retry_limit,
                 )
                 await asyncio.sleep(backoff_delay)
                 continue
@@ -342,7 +348,9 @@ SECURITY_ALERT_TEXT = (
     "🔒 Stay Alert. Stay Safe. Protect Your Funds.\n\n"
     "— iPAY TEAM"
 )
-ISSUES_PROMPT = "🔍 Identify your issue and click the button below to get the appropriate solution. 👇"
+ISSUES_PROMPT = (
+    "Describe your issue, or use /payment, /withdrawal, /commission, or /relink."
+)
 
 SYSTEM_RULES = """ROLE: YOU ARE THE INTELLIGENT AI BRAIN OF THE IPAY TELEGRAM SUPPORT BOT.
 
@@ -360,7 +368,7 @@ transactions unless an authorized integration explicitly provides verified infor
 PROFESSIONAL SUPPORT BEHAVIOR:
 - Understand short messages, spelling mistakes, informal language, English, Hindi,
   Hinglish and Telugu. Respond in the user's preferred language.
-- Understand follow-up context and do not restart or repeat the conversation.
+- Use relevant previous context and do not restart or repeat the conversation.
 - Answer the exact question first, then give only the steps or next action that are useful.
 - Acknowledge the issue briefly. Use short paragraphs and simple, direct language.
 - Avoid long introductions, repeated greetings, excessive emojis and unnecessary headings.
@@ -408,9 +416,10 @@ When a guide excerpt conflicts with the official Category knowledge (such as old
 or outdated bonus amounts), the OFFICIAL CATEGORY KNOWLEDGE OVERRIDES AND REPLACES IT.
 When a PDF excerpt genuinely supports the answer, include its page number briefly when useful.
 
-2. DIRECT, VALID, AND GROUNDED ANSWERS (NEVER GIVE "FAR" OR OFF-TOPIC RESPONSES):
+2. DIRECT, VALID, AND GROUNDED ANSWERS:
 - Immediately and directly answer the exact question asked in the first sentence.
-- Always provide valid, verified, and complete step-by-step instructions.
+- Give only the verified details needed to answer. Provide step-by-step instructions
+  only when the user asks how or the task genuinely requires them.
 - Give the exact in-app path (e.g. iPAY App → Team section, Assets → Bonus → Referral Banner → View Detail, Tools → Add).
 - Never wander into unrelated topics or invent hypothetical platform rules.
 - Understand the difference between: account registration, UID, order placement, order
@@ -794,50 +803,14 @@ The AI must:
 13. If the user asks about an unknown or account-specific matter, politely guide them to human support.
 
 ==================================================
-ADVANCED QUESTION CHECKING & THOROUGH COMPLETE ANSWERS
+QUESTION UNDERSTANDING AND CONCISE ANSWERS
 ==================================================
-1. COMPREHENSIVE QUESTION CHECKING:
-   - When a user asks a question, thoroughly examine and check every element of their message:
-     * Quoted / Dragged Context: If a message begins with "[Context - Replying to: ...]" or quotes
-       a previous bot message/screenshot/text, analyze the quoted text to understand what "this",
-       "why", "how to solve", or "status" refers to.
-     * Core Intent: Pinpoint whether the question relates to referrals, general support,
-       payment/deposit, withdrawals, or guide FAQs.
-     * Multi-Part Queries: If the user asks more than one thing (e.g. "What is minimum withdrawal
-       and how long does it take?", "How to invite and when will I get ₹50?"), identify each
-       individual question and answer every single part in sequence.
-     * Nuance & Specific Conditions: Pay attention to specific details like "15 orders", "₹100",
-       "₹50", "UID", "Bills section", "Pending", "Locked", etc.
-     * Language & Transliteration: Accurately parse misspellings, colloquial expressions, code-mixed
-       sentences (Hinglish/Tenglish), and typos without confusion.
-
-2. PROVIDING FULL, COMPLETE, AND ACTIONABLE ANSWERS:
-   - Never provide half-answers, abrupt truncated notes, or vague one-sentence brush-offs.
-   - Always give complete, step-by-step guidance:
-     * For Referral Invites: Give the exact in-app path (iPAY App → Team section → copy and share referral link).
-     * For Referral Rewards: Explain both amounts (₹100 for referred user, ₹50 for referrer), the condition
-       (invited user must complete 15 orders after registration), and that it credits automatically.
-     * For Missing Referral Rewards: Give the path (iPAY App → Assets → Bonus → Referral Banner → View Detail)
-       where they can check details and claim if applicable.
-     * For Locked Withdrawals/Orders: Explain the cause (unstable connection or logging out during a transaction)
-       AND the exact resolution step (relink wallet in the app so the system processes the order).
-     * For Withdrawal Pending: Explain that an order is currently being processed and pending payment from another
-       user, taking approximately 10–15 minutes.
-     * For Payment Deducted but Not Credited: Direct the user to check their payment app status
-       (Pending/Failed/Successful). If Pending, advise contacting bank/payment provider. If Successful,
-       advise contacting Customer Support with payment screenshot and order details.
-     * For Missing Payment Proof: Guide them to the Bills section in the iPAY app.
-     * For Human Support Escalation: Provide the exact details required (UID, Order ID, screenshot of issue,
-       clear explanation) and note 24/7 availability with 3–5 minute usual response time. Never ask for
-       passwords, OTPs, or UPI PINs.
-     * For Technical Errors: Give exact Category 6 troubleshooting (check/switch network, clear cache, restart app, update app, try another device) and advise sharing screenshot with support if unresolved.
-     * For Wallet Issues: Give exact Category 7 instructions (Tools section below the bar → Add, relink if connection fails, check Bills section, contact support if locked over 24 hours) without confusing with withdrawal limits.
-   - NO "FAR" OR UNRELATED ANSWERS:
-     * Focus 100% on the user's specific problem. Immediately answer what they asked in the very first sentence.
-     * If the user asks about an app crash or freeze, answer ONLY technical troubleshooting; do NOT mention orders, referrals, or withdrawals.
-     * If the user asks about adding a wallet, answer ONLY how to add a wallet; do NOT talk about slow withdrawals.
-     * Never output creative, generic, or fabricated advice.
-   - Always ensure the answer resolves the user's inquiry from start to finish.
+- Understand the complete message and its meaning, using relevant previous context before identifying the request.
+- Recognize informal wording, spelling errors, incomplete questions, and mixed languages.
+- For multi-part questions, answer each part briefly without adding unrelated guidance.
+- Prefer 1–3 short sentences. Give only the most useful verified answer and next step.
+- Use detailed steps only when requested or needed to complete the task.
+- Never guess, repeat completed steps, or add generic support contacts to ordinary answers.
 
 ==================================================
 SCREENSHOT CLASSIFICATION RULES
@@ -934,14 +907,13 @@ Never claim to have checked a transaction or contacted support.
 RESPONSE STYLE
 ==================================================
 Respond in a friendly, professional and understandable manner.
-Use: clear English (or detected user language), short paragraphs, appropriate headings,
-relevant emojis where useful, correct grammar, and direct answers.
-Avoid: unnecessary long explanations, repeating the same greeting, irrelevant answers,
-unverified claims, and confusing technical language.
+Use clear English (or the detected user language), direct answers, and simple wording.
+Normally use 1–3 short sentences; include more only when the user needs detailed steps.
+Avoid headings, emojis, long explanations, repeated greetings, irrelevant answers,
+unverified claims, and confusing technical language unless genuinely useful.
 Ask one concise clarifying question if the issue cannot be understood from the message.
-Mention conflicts in the guide (including older commission figures) and direct users to
-support to confirm. Use existing approved iPAY response templates whenever a specialized
-screenshot handler requires them.
+Mention guide conflicts only when relevant. Use approved iPAY response templates only
+when a specialized screenshot handler requires them.
 If the provided excerpts do not confirm an answer, explain this briefly in the user's
 language and direct them to the configured human support.
 
@@ -2080,6 +2052,31 @@ def _is_group_message_for_bot(message, bot) -> bool:
     return False
 
 
+def _is_ipay_question(text: str) -> bool:
+    mentions_ipay = re.search(
+        r"(?<![\w])(?:i[\s._-]*pay(?:a)?|@ipaybot)(?!\w)",
+        text,
+        re.IGNORECASE,
+    )
+    if not mentions_ipay:
+        return False
+
+    return bool(
+        re.search(r"[?？]", text)
+        or re.search(
+            r"(?<!\w)(?:what|when|where|why|who|whom|which|how|kya|kaise|kab|"
+            r"kahan|kyun|kyu|kaun|ela|enti|eppudu|ekkada)\b",
+            text,
+            re.IGNORECASE,
+        )
+        or re.match(
+            r"\s*(?:is|are|can|could|do|does|did|will|would|should|have|has|had)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _claim_ai_message(
     chat_id: int,
     message_id: Optional[int],
@@ -2145,7 +2142,7 @@ def _remember_photo_file_id(image_path: Path, message) -> None:
 async def _send_home_message(message) -> None:
     if not message:
         return
-    caption = _format_welcome_caption()
+    caption = f"{_format_welcome_caption()}\n\nAsk a question or use /help for commands."
     if WELCOME_IMAGE_PATH.is_file():
         try:
             file_id = PHOTO_FILE_IDS.get(_image_cache_key(WELCOME_IMAGE_PATH))
@@ -2153,7 +2150,6 @@ async def _send_home_message(message) -> None:
                 sent_message = await message.reply_photo(
                     photo=file_id,
                     caption=caption,
-                    reply_markup=main_keyboard(),
                     parse_mode="HTML",
                 )
             else:
@@ -2161,7 +2157,6 @@ async def _send_home_message(message) -> None:
                     sent_message = await message.reply_photo(
                         photo=InputFile(image),
                         caption=caption,
-                        reply_markup=main_keyboard(),
                         parse_mode="HTML",
                     )
             _remember_photo_file_id(WELCOME_IMAGE_PATH, sent_message)
@@ -2170,7 +2165,7 @@ async def _send_home_message(message) -> None:
             log.error("Could not send the home image (%s): %s", type(exc).__name__, exc)
     else:
         log.error("Home image is missing: %s", WELCOME_IMAGE_PATH)
-    await message.reply_text(caption, reply_markup=main_keyboard(), parse_mode="HTML")
+    await message.reply_text(caption, parse_mode="HTML")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2234,12 +2229,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.effective_message:
         _remember_menu_page(context, update, "nav:menu")
         await update.effective_message.reply_text(
-            "Choose a button or ask a question in your language. I can explain wallets, "
-            "deposit and withdrawal steps, rewards, referrals, and account-safety "
-            "guidance from the supplied guide. I cannot check live accounts or "
-            "payments. Use /boost and mention your six-digit UID for withdrawal guidance; it does not "
-            "apply a payout boost. Never send passwords, OTPs, or PINs.",
-            reply_markup=main_keyboard(),
+            "Ask me naturally, or use /ask <question> in a group. Common commands: "
+            "/payment, /withdrawal, /relink, /walletstatus, /issues, /wallets, "
+            "/faq, /support, and /agent. Never send passwords, OTPs, or PINs.",
         )
 
 
@@ -5428,14 +5420,13 @@ async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "1. *Delayed Withdrawal:* Check your receiving limit, UPI status, account ability to receive funds, and wallet connection. Ask support to check an unresolved withdrawal.\n"
         "2. *Deposit Not Reflected:* Verify recipient UPI, submit matching UTR number and payment screenshot in iPay.\n"
         "3. *Supported Wallets:* PhonePe, Paytm, MobiKwik, and Freecharge. Pocket UPI is not supported.\n"
-        "4. *Order Locked:* Select the *Order locked* option below for approved wallet and bank limit guidance.\n"
+        "4. *Order Locked:* Ask /ask how to resolve a locked order.\n"
         "5. *Commissions & Rewards:* The guide lists 4% for successfully completed eligible orders. Check current offer conditions; rewards are conditional.\n\n"
-        "Choose an option below for detailed guidance:"
+        "Ask a question for help with any of these topics."
     )
     await message.reply_text(
         faq_text,
         parse_mode="Markdown",
-        reply_markup=notice_keyboard(),
     )
 
 
@@ -5469,7 +5460,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"{ICON_LOCATION} Official Support Group: {GROUP_SUPPORT_URL}\n\n"
         f"{ICON_PIN} Security Notice: Support managers will NEVER ask for your password, OTP, or PIN."
     )
-    await message.reply_text(text, reply_markup=support_keyboard())
+    await message.reply_text(text)
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5521,10 +5512,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "and attach relevant order/UTR screenshots.\n"
         ""
     )
-    await message.reply_text(
-        report_text,
-        reply_markup=notice_keyboard(),
-    )
+    await message.reply_text(report_text)
 
 
 async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5548,12 +5536,9 @@ async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"1. Contact customer support: {SUPPORT_1} or {SUPPORT_2}\n"
         "2. Provide your UID and the UTR / transaction timestamp.\n"
         "3. Do NOT make duplicate payments or click suspicious third-party links.\n\n"
-        "This bot does not forward urgent escalations. Contact support directly using the links below."
+        "This bot does not forward urgent escalations. Contact support directly using the handles above."
     )
-    await message.reply_text(
-        text,
-        reply_markup=support_keyboard(),
-    )
+    await message.reply_text(text)
 
 
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5654,42 +5639,27 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         await _stop_background_task(locals().get("typing_task"))
         log.error("/ask failed (%s)", type(exc).__name__)
-        await message.reply_text(
-            f"Need assistance with {question}. Contact the configured iPAY support "
-            f"team: {SUPPORT_1} or {SUPPORT_2}.",
-        )
+        await message.reply_text(AI_UNAVAILABLE_MESSAGE)
 
 
 async def relink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(
-            _wallet_caption("relink"),
-            reply_markup=wallets_keyboard(),
-        )
+        await update.effective_message.reply_text(_wallet_caption("relink"))
 
 
 async def wallet_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(
-            _wallet_caption("status"),
-            reply_markup=wallets_keyboard(),
-        )
+        await update.effective_message.reply_text(_wallet_caption("status"))
 
 
 async def troubleshoot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(
-            _wallet_caption("troubleshoot"),
-            reply_markup=wallets_keyboard(),
-        )
+        await update.effective_message.reply_text(_wallet_caption("troubleshoot"))
 
 
 async def new_wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(
-            _wallet_caption("new_wallets"),
-            reply_markup=wallets_keyboard(),
-        )
+        await update.effective_message.reply_text(_wallet_caption("new_wallets"))
 
 
 async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5705,18 +5675,17 @@ async def issues_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     caption = ISSUES_PROMPT
     if not ISSUES_IMAGE_PATH.is_file():
         log.warning("Issues image is missing: %s", ISSUES_IMAGE_PATH.name)
-        await message.reply_text(caption, reply_markup=issues_keyboard())
+        await message.reply_text(caption)
         return
     try:
         with ISSUES_IMAGE_PATH.open("rb") as image:
             await message.reply_photo(
                 photo=InputFile(image),
                 caption=caption,
-                reply_markup=issues_keyboard(),
             )
     except (OSError, TelegramError) as exc:
         log.error("Could not send the issues image (%s)", type(exc).__name__)
-        await message.reply_text(caption, reply_markup=issues_keyboard())
+        await message.reply_text(caption)
 
 
 async def security_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5737,7 +5706,6 @@ async def commission_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_message:
         await update.effective_message.reply_text(
             _issue_answer("commission")[0],
-            reply_markup=main_keyboard(),
         )
 
 
@@ -5754,7 +5722,6 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await _send_guide_page(update.effective_message, pages[0])
         await update.effective_message.reply_text(
             text,
-            reply_markup=support_options_keyboard(),
         )
 
 
@@ -5767,7 +5734,6 @@ async def withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await _send_guide_page(update.effective_message, pages[0])
         await update.effective_message.reply_text(
             text,
-            reply_markup=support_options_keyboard(),
         )
 
 
@@ -5783,7 +5749,6 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "IMPORTANT\n"
         "- This is not a separate unlocking fee.\n"
         "- Ask support to clarify the quota.",
-        support_options_keyboard(),
     )
 
 
@@ -5803,9 +5768,6 @@ async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         await message.reply_text(
             f"{ICON_PIN} Trained resolution for: {issue}\n\n{entry.get('resolution', '')}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"{ICON_MESSAGE} Contact support", callback_data="menu:support")]]
-            ),
         )
         return
     if not _PROBLEM_RESOLUTIONS:
@@ -5829,34 +5791,27 @@ async def _send_wallets(message) -> None:
         return
     caption = _wallet_caption("overview")
     image_path = WALLET_IMAGE_PATH
-    keyboard = wallets_keyboard()
     if image_path.is_file():
         try:
             with image_path.open("rb") as image:
                 await message.reply_photo(
                     photo=InputFile(image),
                     caption=caption,
-                    reply_markup=keyboard,
                 )
             return
         except (OSError, TelegramError) as exc:
             log.error("Could not send wallet menu image (%s): %s", type(exc).__name__, exc)
-    await message.reply_text(
-        caption,
-        reply_markup=keyboard,
-    )
+    await message.reply_text(caption)
 
 
 async def _send_security(message) -> None:
     if not message:
         return
-    keyboard = security_keyboard()
     if not SECURITY_IMAGE_PATH.is_file():
         log.error("Security image is missing: %s", SECURITY_IMAGE_PATH)
         await message.reply_text(
             "The security image is unavailable. Keep passwords, OTPs, and PINs "
-            "private, and contact customer support if you need help.",
-            reply_markup=keyboard,
+            "private, and use /agent if you need human assistance.",
         )
         return
     try:
@@ -5864,14 +5819,10 @@ async def _send_security(message) -> None:
             await message.reply_photo(
                 photo=InputFile(image),
                 caption=SECURITY_ALERT_TEXT,
-                reply_markup=keyboard,
             )
     except (OSError, TelegramError) as exc:
         log.error("Could not send security image (%s): %s", type(exc).__name__, exc)
-        await message.reply_text(
-            SECURITY_ALERT_TEXT,
-            reply_markup=keyboard,
-        )
+        await message.reply_text(SECURITY_ALERT_TEXT)
 
 
 async def _send_support(message) -> None:
@@ -5882,7 +5833,7 @@ async def _send_support(message) -> None:
             with SUPPORT_IMAGE_PATH.open("rb") as image:
                 await message.reply_photo(
                     photo=InputFile(image),
-                    reply_markup=support_options_keyboard(),
+                    caption="Use /agent for configured support contacts.",
                 )
             return
         except (OSError, TelegramError) as exc:
@@ -5890,8 +5841,7 @@ async def _send_support(message) -> None:
     else:
         log.error("Support image is missing: %s", SUPPORT_IMAGE_PATH)
     await message.reply_text(
-        "Support image unavailable. Choose a support option below.",
-        reply_markup=support_options_keyboard(),
+        "Support image unavailable. Use /agent for configured support contacts."
     )
 
 
@@ -5904,7 +5854,6 @@ async def _send_referral(message) -> None:
         "orders on the same day. Current availability, qualifying-order rules, and "
         "the exact expiry calculation are not confirmed. Ask support to confirm "
         "the live offer. This bot cannot generate referral links or check referral status.",
-        reply_markup=referral_keyboard(),
     )
 
 
@@ -6053,7 +6002,6 @@ async def _send_custom_image(
     filename: str,
     caption: str,
     explanation: str,
-    keyboard: InlineKeyboardMarkup,
 ) -> None:
     if not message:
         return
@@ -6075,14 +6023,13 @@ async def _send_custom_image(
         await message.reply_text(
             "The illustration is unavailable. The confirmed guidance is below."
         )
-    await message.reply_text(explanation, reply_markup=keyboard)
+    await message.reply_text(explanation)
 
 
 async def _replace_callback_image(
     update: Update,
     image_path: Path,
     caption: str,
-    keyboard: InlineKeyboardMarkup,
     parse_mode: Optional[str] = None,
 ) -> bool:
     query = update.callback_query
@@ -6092,7 +6039,11 @@ async def _replace_callback_image(
     if not image_path.is_file():
         log.warning("Menu image is missing: %s", image_path.name)
         if caption:
-            return await _replace_callback_text(update, caption, keyboard)
+            return await _replace_callback_text(
+                update,
+                caption,
+                parse_mode=parse_mode or "HTML",
+            )
         return False
 
     cache_key = _image_cache_key(image_path)
@@ -6100,7 +6051,7 @@ async def _replace_callback_image(
 
     async def send_new_image() -> bool:
         def image_kwargs() -> Dict[str, Any]:
-            kwargs: Dict[str, Any] = {"reply_markup": keyboard}
+            kwargs: Dict[str, Any] = {}
             if caption:
                 kwargs["caption"] = caption[:1024]
                 if parse_mode:
@@ -6162,7 +6113,6 @@ async def _replace_callback_image(
 async def _replace_callback_text(
     update: Update,
     text: str,
-    keyboard: InlineKeyboardMarkup,
     parse_mode: str = "HTML",
 ) -> bool:
     query = update.callback_query
@@ -6170,7 +6120,7 @@ async def _replace_callback_text(
     if not query or not message:
         return False
     try:
-        await message.reply_text(text, reply_markup=keyboard, parse_mode=parse_mode)
+        await message.reply_text(text, parse_mode=parse_mode)
     except TelegramError as exc:
         log.error("Could not send replacement menu text (%s): %s", type(exc).__name__, exc)
         return False
@@ -6191,85 +6141,73 @@ async def _show_wallet_menu(update: Update, mode: str = "payin") -> None:
         return
 
     caption = _wallet_caption(mode)
-    keyboard = wallets_keyboard()
     image_path = WALLET_IMAGE_PATH
-    if not await _replace_callback_image(update, image_path, caption, keyboard):
-        await _present_callback(update, caption, keyboard)
+    if not await _replace_callback_image(update, image_path, caption):
+        await _present_callback(update, caption)
 
 
 async def _present_callback(
     update: Update,
     text: str,
-    keyboard: InlineKeyboardMarkup,
 ) -> None:
-    await _replace_callback_text(update, text, keyboard)
+    await _replace_callback_text(update, text)
 
 
 async def _show_home_menu(update: Update) -> None:
+    caption = f"{_format_welcome_caption()}\n\nAsk a question or use /help for commands."
     if not await _replace_callback_image(
         update,
         WELCOME_IMAGE_PATH,
-        _format_welcome_caption(),
-        main_keyboard(),
+        caption,
     ):
-        await _present_callback(
-            update,
-            _format_welcome_caption(),
-            main_keyboard(),
-        )
+        await _present_callback(update, caption)
 
 
 async def _show_support_menu(update: Update) -> None:
     if not await _replace_callback_image(
         update,
         SUPPORT_IMAGE_PATH,
-        "",
-        support_options_keyboard(),
+        "Use /agent for configured support contacts.",
     ):
         await _present_callback(
             update,
-            "Support image unavailable. Choose a support option below.",
-            support_options_keyboard(),
+            "Support image unavailable. Use /agent for configured support contacts.",
         )
 
 
 async def _show_issues_menu(update: Update) -> None:
     caption = ISSUES_PROMPT
-    keyboard = issues_keyboard()
     if not await _replace_callback_image(
         update,
         ISSUES_IMAGE_PATH,
         caption,
-        keyboard,
     ):
         await _present_callback(
             update,
-            "The Issues image could not be sent. Choose an issue below:",
-            keyboard,
+            "The Issues image could not be sent. Ask about your issue or use "
+            "/payment, /withdrawal, or /commission.",
         )
 
 
 async def _show_security_menu(update: Update) -> None:
-    keyboard = security_keyboard()
     if not await _replace_callback_image(
         update,
         SECURITY_IMAGE_PATH,
         SECURITY_ALERT_TEXT,
-        keyboard,
     ):
-        await _present_callback(
-            update,
-            SECURITY_ALERT_TEXT,
-            keyboard,
-        )
+        await _present_callback(update, SECURITY_ALERT_TEXT)
 
 
 async def _show_new_user_menu(update: Update) -> None:
-    keyboard = new_user_keyboard()
     if not await _replace_callback_image(
-        update, WELCOME_IMAGE_PATH, "", keyboard
+        update,
+        WELCOME_IMAGE_PATH,
+        "Ask about getting started, placing an order, referrals, or account safety.",
     ):
-        await _replace_callback_text(update, "Choose a topic below:", keyboard)
+        await _replace_callback_text(
+            update,
+            "Ask a question about getting started, placing an order, referrals, or account safety.",
+        )
 
 
 async def _send_new_user_guide(update: Update) -> None:
@@ -6290,14 +6228,12 @@ async def _send_new_user_guide(update: Update) -> None:
             GUIDE_PDF_PATH, type(exc).__name__, exc,
         )
         await message.reply_text(
-            "The iPay User Guide PDF is currently unavailable. Please contact support.",
-            reply_markup=new_user_keyboard(),
+            "The iPay User Guide PDF is currently unavailable. Use /ask for guidance.",
         )
     except TelegramError as exc:
         log.error("Could not send user guide PDF (%s): %s", type(exc).__name__, exc)
         await message.reply_text(
             "The iPay User Guide could not be sent. Please try again later.",
-            reply_markup=new_user_keyboard(),
         )
 
 
@@ -6313,19 +6249,13 @@ async def _send_how_ipay_works(update: Update) -> None:
         "🎯 Complete Orders • Earn Rewards!\n\n"
         "◆ START YOUR iPAY JOURNEY!"
     )
-    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
         update,
         HOW_IPAY_WORKS_IMAGE_PATH,
         caption,
-        keyboard,
         parse_mode="HTML",
     ):
-        await _replace_callback_text(
-            update,
-            caption,
-            keyboard,
-        )
+        await _replace_callback_text(update, caption)
 
 
 async def _send_how_to_place_order(update: Update) -> None:
@@ -6344,19 +6274,13 @@ async def _send_how_to_place_order(update: Update) -> None:
         "🎯 FOLLOW • VERIFY • COMPLETE!\n\n"
         "◆ SIMPLE • SECURE • TRUSTED"
     )
-    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
         update,
         HOW_TO_PLACE_ORDER_IMAGE_PATH,
         caption,
-        keyboard,
         parse_mode="HTML",
     ):
-        await _replace_callback_text(
-            update,
-            caption,
-            keyboard,
-        )
+        await _replace_callback_text(update, caption)
 
 
 async def _send_security_alerts(update: Update) -> None:
@@ -6373,11 +6297,10 @@ async def _send_security_alerts(update: Update) -> None:
         "▪️ Report any scam attempts immediately.\n\n"
         "◆ STAY ALERT • STAY SAFE!\n\n— iPAY TEAM"
     )
-    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, SUGGESTION_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
+        update, SUGGESTION_IMAGE_PATH, caption, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption, keyboard)
+        await _replace_callback_text(update, caption)
 
 
 async def _send_smart_sales_settings(update: Update) -> None:
@@ -6394,11 +6317,10 @@ async def _send_smart_sales_settings(update: Update) -> None:
         "▪️ Keep your account settings updated.\n\n"
         "◆ MANAGE • CONTROL • STAY UPDATED!"
     )
-    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, GUIDELINES_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
+        update, GUIDELINES_IMAGE_PATH, caption, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption, keyboard)
+        await _replace_callback_text(update, caption)
 
 
 async def _send_newuser_referral(update: Update) -> None:
@@ -6416,11 +6338,10 @@ async def _send_newuser_referral(update: Update) -> None:
         "▪️ Claim your referral rewards.\n\n"
         "◆ INVITE • COMPLETE • EARN!"
     )
-    keyboard = InlineKeyboardMarkup([[_back_button()]])
     if not await _replace_callback_image(
-        update, REFERRAL_IMAGE_PATH, caption, keyboard, parse_mode="HTML"
+        update, REFERRAL_IMAGE_PATH, caption, parse_mode="HTML"
     ):
-        await _replace_callback_text(update, caption, keyboard)
+        await _replace_callback_text(update, caption)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6498,7 +6419,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _show_support_menu(update)
         return
     if action == "menu:customer_support":
-        caption = "Choose a customer support contact:"
+        caption = "For configured support contacts, use /agent."
         keyboard = support_keyboard()
         if not await _replace_callback_image(
             update,
@@ -6538,7 +6459,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if action == "menu:start":
         if START_URL and _url_is_safe(START_URL):
-            text = "Open the configured iPay starting page using the button below."
+            text = f"iPay starting page: {START_URL}"
         elif START_URL:
             text = "The configured START_URL is not a valid HTTPS URL. Ask the bot administrator to correct it."
         else:
@@ -6698,7 +6619,11 @@ async def _gemini_answer(
                     temperature=0.2,
                 ),
             )
-        stream = await _call_gemini_with_retry("chat_stream", _start_stream)
+        stream = await _call_gemini_with_retry(
+            "chat_stream",
+            _start_stream,
+            max_retries=0,
+        )
         answer_parts: List[str] = []
         async for chunk in stream:
             content = getattr(chunk, "text", None)
@@ -6708,7 +6633,10 @@ async def _gemini_answer(
                     await on_update("".join(answer_parts))
         return "".join(answer_parts).strip()
 
-    return await asyncio.wait_for(collect_response(), timeout=AI_TIMEOUT_SECONDS)
+    return await asyncio.wait_for(
+        collect_response(),
+        timeout=AI_CHAT_TIMEOUT_SECONDS,
+    )
 
 
 async def _ai_answer(
@@ -6735,15 +6663,8 @@ async def _ai_answer(
         await asyncio.to_thread(record_unanswered_question, question)
     if gemini_client is None:
         if custom_faqs:
-            return (
-                "\n\n".join(f"{entry['title']}\n{entry['answer']}" for entry in custom_faqs),
-                pages,
-            )
-        return (
-            "AI answers are not configured yet. You can use the issue menus for "
-            "guide-based steps or contact human support.",
-            pages,
-        )
+            return custom_faqs[0]["answer"], pages
+        return AI_UNAVAILABLE_MESSAGE, pages
     evidence_pages = pages if pages else []
     snippet_texts = [
         f"Verified Knowledge:\n{k.text}"
@@ -6930,6 +6851,11 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat.type != ChatType.PRIVATE and not is_group:
         return
 
+    if not _is_ipay_question(message_text.strip()):
+        return
+    if is_group and not _is_group_message_for_bot(message, getattr(context, "bot", None)):
+        return
+
     message_id = getattr(message, "message_id", None)
     text = message_text.strip()
     if not _claim_ai_message(
@@ -6948,14 +6874,6 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     if await _handle_boost_message(update, context, text):
-        return
-
-    addressed_to_bot = (
-        _is_group_message_for_bot(message, getattr(context, "bot", None))
-        if is_group
-        else True
-    )
-    if is_group and not addressed_to_bot:
         return
 
     # Handle explicit UID requests without claiming account verification.
@@ -6989,10 +6907,9 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clean_text = re.sub(r"@\w+", "", text).strip().lower()
     clean_norm = re.sub(r"[^\w\s]", "", clean_text).strip()
     if not replied_text and clean_norm in {"", "help", "start", "/hii", "/hi"}:
-        if is_group:
-            await message.reply_text("Please tell me what you need help with.")
-            return
-        await _send_home_message(message)
+        await message.reply_text(
+            "What do you need help with? Ask me here, or use /ask <question>."
+        )
         return
 
     # Direct bot identity inquiries
@@ -7066,12 +6983,6 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             await _stop_background_task(typing_task)
         await _async_add_conversation_turn(conversation_id, question, answer)
-        norm_q = re.sub(r"[^\w\s]", "", question.strip().casefold())
-        is_casual = norm_q in {
-            "thanks", "thank you", "thx", "ok", "okay", "alright", "how are you",
-            "are you there", "good morning", "good evening", "hi", "hello",
-            "hey", "yes", "no", "cool", "fine"
-        }
         answer_with_support = answer
         user_wants_guide_image = bool(
             re.search(
@@ -7098,22 +7009,11 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         await _stop_background_task(locals().get("typing_task"))
         log.error("AI reply failed (%s)", type(exc).__name__)
-        norm_q = re.sub(r"[^\w\s]", "", question.strip().casefold())
-        is_casual = norm_q in {
-            "thanks", "thank you", "thx", "ok", "okay", "alright", "how are you",
-            "are you there", "good morning", "good evening", "hi", "hello",
-            "hey", "yes", "no", "cool", "fine"
-        }
-        raw_fallback = _ai_unavailable_answer(question, guide)
-        if is_casual:
-            fallback = raw_fallback
-        else:
-            fallback = raw_fallback
-        await message.reply_text(fallback)
+        await message.reply_text(AI_UNAVAILABLE_MESSAGE)
         await _save_question_event(
             update,
             question,
-            fallback,
+            AI_UNAVAILABLE_MESSAGE,
             "needs_human_review",
             telegram_bot=getattr(context, "bot", None),
         )
@@ -7265,7 +7165,27 @@ def build_application(
             "remains available when its client is configured."
         )
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("hi", hi_command))
+    application.add_handler(CommandHandler("faq", faq_command))
+    application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("urgent", urgent_command))
+    application.add_handler(CommandHandler("wallets", wallets_command))
+    application.add_handler(CommandHandler("issues", issues_command))
+    application.add_handler(CommandHandler("security", security_command))
+    application.add_handler(CommandHandler("support", support_command))
+    application.add_handler(CommandHandler("referral", referral_command))
+    application.add_handler(CommandHandler("commission", commission_command))
+    application.add_handler(CommandHandler("rewards", rewards_command))
+    application.add_handler(CommandHandler("payment", payment_command))
+    application.add_handler(CommandHandler("withdrawal", withdrawal_command))
+    application.add_handler(CommandHandler("relink", relink_command))
+    application.add_handler(CommandHandler("walletstatus", wallet_status_command))
+    application.add_handler(CommandHandler("troubleshoot", troubleshoot_command))
+    application.add_handler(CommandHandler("newwallets", new_wallets_command))
+    application.add_handler(CommandHandler("quota", quota_command))
     application.add_handler(CommandHandler(BOOST_COMMANDS, boost_command))
     application.add_handler(MessageHandler(filters.CAPTION, boost_caption_handler))
     application.add_handler(CommandHandler("questions", questions_command))
